@@ -6,7 +6,7 @@ Your next task. In plain sight. A native menu-bar companion for Codex Desktop, f
 
 [Website](https://stacksimpl.web.app/codex-task-manager/) · [Issues](https://github.com/JakeMawson/codex-task-manager/issues)
 
-This is an early beta. Known startup and task-status issues remain; use Codex as the source of truth.
+This is an early beta. Version 0.1.1 repairs menu-bar startup and preserves existing app settings. Task-status behavior is still being refined; use Codex as the source of truth.
 
 ## Install
 

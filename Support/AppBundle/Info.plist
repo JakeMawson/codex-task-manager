@@ -9,7 +9,7 @@
 	<key>CFBundleExecutable</key>
 	<string>CodexTaskManager</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.jakemawson.codex-task-manager</string>
+	<string>com.jakemawson.codex-task-manager.menubar</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.1.1</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.developer-tools</string>
 	<key>LSMinimumSystemVersion</key>
