@@ -4,7 +4,8 @@ if [[ $# != 1 ]]; then echo 'Usage: Scripts/finalize-release /absolute/signed/re
 release_output="$1"
 release_app="$release_output/Codex Task Manager.app"
 test -f "$release_output/notarization-input.zip"
-test -f "$release_app/Contents/MacOS/CodexTaskManager"
+test -f "$release_app/Contents/MacOS/CodexTaskManagerLauncher"
+test -f "$release_app/Contents/Library/LoginItems/CodexTaskManagerMenuAgent.app/Contents/MacOS/CodexTaskManager"
 # Always use this app's own dedicated profile; do not borrow another product's.
 xcrun notarytool submit "$release_output/notarization-input.zip" --keychain-profile 'Codex Task Manager Notary' --wait
 xcrun stapler staple "$release_app"

@@ -1,6 +1,8 @@
 # Beta releases
 
-The current beta is 0.1.1 (build 2). It repairs menu-bar startup with a native AppKit lifecycle and a fresh bundle identity. Task-status behavior is still being refined; do not represent this as a stable release.
+The current beta is 0.1.1 (build 4). The signed app launcher starts its own nested menu agent with independent macOS process responsibility. This prevents a terminal or IDE's disabled menu-bar appearance switch from hiding Task Manager. The launcher and agent use `com.jakemawson.codex-task-manager.launcher` and `com.jakemawson.codex-task-manager.menuagent`; only app-owned settings migrate from the previous two identities. The popover publishes its full fixed panel size before positioning so its header and controls remain on screen. Task-status behavior is still being refined; do not represent this as a stable release.
+
+The launch bridge dynamically resolves the macOS responsibility attribute also used by LLVM/LLDB. It is a private platform API: verify it on supported macOS versions before release, and fail with a visible launch error if unavailable. It changes process attribution, not OS permission grants or other apps' settings. The helper is bundled; no other installed app is required. Login startup is not automatically enabled.
 
 Before releasing a menu-bar change, test the installed bundle on macOS: visually confirm one item and process, open and close the real popover, exercise its search and display controls, launch a second instance, quit through its menu and relaunch twice. A live process or an Accessibility entry alone does not prove the item is visible. Test the registration-failure and item-removal QA routes and preserve app settings during identity changes.
 

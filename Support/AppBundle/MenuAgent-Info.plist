@@ -7,9 +7,9 @@
 	<key>CFBundleDisplayName</key>
 	<string>Codex Task Manager</string>
 	<key>CFBundleExecutable</key>
-	<string>CodexTaskManagerLauncher</string>
+	<string>CodexTaskManager</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.jakemawson.codex-task-manager.launcher</string>
+	<string>com.jakemawson.codex-task-manager.menuagent</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

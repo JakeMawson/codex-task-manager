@@ -22,20 +22,28 @@ p.mkdir(parents=True,exist_ok=False)
 PY
 case "$release_identity" in 'Developer ID Application: '*) ;; *) echo 'A Developer ID Application identity is required.' >&2; exit 2;; esac
 for release_arch in arm64 x86_64; do
-  xcrun swift build --package-path "$release_root" --scratch-path "$release_output/swift-$release_arch" --arch "$release_arch" --jobs 2 -c release --product CodexTaskManager
+  for release_product in CodexTaskManager CodexTaskManagerLauncher; do
+  xcrun swift build --package-path "$release_root" --scratch-path "$release_output/swift-$release_arch" --arch "$release_arch" --jobs 2 -c release --product "$release_product"
   release_bin="$(xcrun swift build --package-path "$release_root" --scratch-path "$release_output/swift-$release_arch" --arch "$release_arch" -c release --show-bin-path)"
-  test -f "$release_bin/CodexTaskManager"
-  install "$release_bin/CodexTaskManager" "$release_output/CodexTaskManager-$release_arch"
+  test -f "$release_bin/$release_product"
+  install "$release_bin/$release_product" "$release_output/$release_product-$release_arch"
+  done
 done
 release_app="$release_output/Codex Task Manager.app"
+release_agent="$release_app/Contents/Library/LoginItems/CodexTaskManagerMenuAgent.app"
 mkdir -p "$release_app/Contents/MacOS" "$release_app/Contents/Resources"
+mkdir -p "$release_agent/Contents/MacOS"
 cp "$release_root/Support/AppBundle/Info.plist" "$release_app/Contents/Info.plist"
-xcrun lipo -create "$release_output/CodexTaskManager-arm64" "$release_output/CodexTaskManager-x86_64" -output "$release_app/Contents/MacOS/CodexTaskManager"
-chmod 755 "$release_app/Contents/MacOS/CodexTaskManager"
+cp "$release_root/Support/AppBundle/MenuAgent-Info.plist" "$release_agent/Contents/Info.plist"
+xcrun lipo -create "$release_output/CodexTaskManager-arm64" "$release_output/CodexTaskManager-x86_64" -output "$release_agent/Contents/MacOS/CodexTaskManager"
+xcrun lipo -create "$release_output/CodexTaskManagerLauncher-arm64" "$release_output/CodexTaskManagerLauncher-x86_64" -output "$release_app/Contents/MacOS/CodexTaskManagerLauncher"
+chmod 755 "$release_agent/Contents/MacOS/CodexTaskManager" "$release_app/Contents/MacOS/CodexTaskManagerLauncher"
+/usr/bin/codesign --force --timestamp --options runtime --sign "$release_identity" "$release_agent"
 /usr/bin/codesign --force --timestamp --options runtime --sign "$release_identity" "$release_app"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$release_app"
 /usr/bin/plutil -lint "$release_app/Contents/Info.plist"
-xcrun lipo -info "$release_app/Contents/MacOS/CodexTaskManager"
+xcrun lipo -info "$release_agent/Contents/MacOS/CodexTaskManager"
+xcrun lipo -info "$release_app/Contents/MacOS/CodexTaskManagerLauncher"
 /usr/bin/ditto -c -k --keepParent "$release_app" "$release_output/notarization-input.zip"
 echo "Signed app: $release_app"
 echo 'Notarization is required before public release; follow RELEASING.md.'

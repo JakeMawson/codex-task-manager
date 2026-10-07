@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "CodexTaskManager", targets: ["CodexTaskManager"]),
+        .executable(name: "CodexTaskManagerLauncher", targets: ["CodexTaskManagerLauncher"]),
         .executable(name: "CodexTaskManagerBenchmark", targets: ["CodexTaskManagerBenchmark"]),
     ],
     targets: [
@@ -20,6 +21,11 @@ let package = Package(
             name: "CodexTaskManager",
             dependencies: ["CodexTaskManagerKit"]
         ),
+        .executableTarget(
+            name: "CodexTaskManagerLauncher",
+            dependencies: ["IndependentAppLaunch"]
+        ),
+        .target(name: "IndependentAppLaunch"),
         .executableTarget(
             name: "CodexTaskManagerBenchmark",
             dependencies: ["CodexTaskManagerKit"],

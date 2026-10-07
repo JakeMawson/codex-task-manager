@@ -9,12 +9,14 @@ enum CodexTaskManagerMain {
     private static let appDelegate = AppDelegate()
 
     static func main() {
-        if Bundle.main.bundleIdentifier == "com.jakemawson.codex-task-manager.menubar",
+        if Bundle.main.bundleIdentifier == "com.jakemawson.codex-task-manager.menuagent",
            !CommandLine.arguments.contains("--qa-fixture"),
            !CommandLine.arguments.contains("--qa-no-response") {
             TaskManagerPreferencesMigration.migrate(
                 into: .standard,
-                legacyDomains: [UserDefaults.standard.persistentDomain(forName: "com.jakemawson.codex-task-manager") ?? [:]]
+                legacyDomains: ["com.jakemawson.codex-task-manager.menubar", "com.jakemawson.codex-task-manager"].map {
+                    UserDefaults.standard.persistentDomain(forName: $0) ?? [:]
+                }
             )
         }
         let application = NSApplication.shared
@@ -33,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusRefreshTimer: Timer?
     private var registrationAttempt = 0
     private var outsideClickMonitors: [Any] = []
-    private static let reopenNotification = Notification.Name("com.jakemawson.codex-task-manager.show-tasks")
+    private static let reopenNotification = Notification.Name("com.jakemawson.codex-task-manager.menuagent.show-tasks")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !handOffToExistingInstance() else { return }
@@ -229,10 +231,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func resetStatusPopoverContent() {
-        statusPopover.contentViewController = NSHostingController(
+        let hostingController = NSHostingController(
             rootView: TaskManagerPanel(model: Self.taskManagerModel)
         )
-        _ = statusPopover.contentViewController?.view
+        // Give AppKit the fixed panel size before it positions the popover.
+        // Starting with an unsized hosting view lets the first SwiftUI layout
+        // expand the window above the menu bar, clipping the panel's controls.
+        let panelSize = NSSize(width: TaskManagerMetrics.panelWidth, height: TaskManagerMetrics.panelHeight)
+        hostingController.sizingOptions = [.preferredContentSize]
+        hostingController.preferredContentSize = panelSize
+        hostingController.view.setFrameSize(panelSize)
+        statusPopover.contentViewController = hostingController
+        statusPopover.contentSize = panelSize
     }
 
     private func installOutsideClickMonitors() {

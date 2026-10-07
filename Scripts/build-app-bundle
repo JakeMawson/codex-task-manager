@@ -14,12 +14,19 @@ esac
 
 cd "$project_root"
 /usr/bin/swift build -c "$configuration" --product CodexTaskManager
+/usr/bin/swift build -c "$configuration" --product CodexTaskManagerLauncher
 bin_path="$(/usr/bin/swift build -c "$configuration" --show-bin-path)"
-bundle_path="$project_root/build/macos/Codex Task Manager.bundle-staging"
+bundle_path="$project_root/build/macos/$(/usr/bin/uuidgen)/Codex Task Manager.app"
+test ! -e "$bundle_path"
+agent_path="$bundle_path/Contents/Library/LoginItems/CodexTaskManagerMenuAgent.app"
 
 /bin/mkdir -p "$bundle_path/Contents/MacOS" "$bundle_path/Contents/Resources"
+/bin/mkdir -p "$agent_path/Contents/MacOS"
 /usr/bin/install -m 0644 "$project_root/Support/AppBundle/Info.plist" "$bundle_path/Contents/Info.plist"
-/usr/bin/install -m 0755 "$bin_path/CodexTaskManager" "$bundle_path/Contents/MacOS/CodexTaskManager"
-/usr/bin/codesign --force --deep --sign - "$bundle_path"
+/usr/bin/install -m 0644 "$project_root/Support/AppBundle/MenuAgent-Info.plist" "$agent_path/Contents/Info.plist"
+/usr/bin/install -m 0755 "$bin_path/CodexTaskManager" "$agent_path/Contents/MacOS/CodexTaskManager"
+/usr/bin/install -m 0755 "$bin_path/CodexTaskManagerLauncher" "$bundle_path/Contents/MacOS/CodexTaskManagerLauncher"
+/usr/bin/codesign --force --sign - "$agent_path"
+/usr/bin/codesign --force --sign - "$bundle_path"
 
 print -r -- "$bundle_path"
