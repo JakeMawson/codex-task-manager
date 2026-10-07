@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+# Package a fresh universal Developer ID build. This script never empties outputs.
+if [[ $# != 2 ]]; then
+  echo 'Usage: Scripts/package-release /absolute/fresh/output "Developer ID Application: Publisher (TEAMID)"' >&2
+  exit 2
+fi
+release_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+release_output="$1"
+release_identity="$2"
+python3 - "$release_root" "$release_output" <<'PY'
+import sys
+from pathlib import Path
+root=Path(sys.argv[1]).resolve(); raw=Path(sys.argv[2])
+if not raw.is_absolute() or raw.exists():raise SystemExit('Output must be an absolute, fresh directory.')
+p=raw.resolve()
+if raw!=p or p==root or p in root.parents or p==Path.home() or p==Path('/'):raise SystemExit('Unsafe output path.')
+for parent in raw.parents:
+    if parent.is_symlink():raise SystemExit('Symlink output ancestors are refused.')
+if root in p.parents and not p.is_relative_to(root/'build'/'releases'):raise SystemExit('In-project outputs must be fresh build/releases directories.')
+p.mkdir(parents=True,exist_ok=False)
+PY
+case "$release_identity" in 'Developer ID Application: '*) ;; *) echo 'A Developer ID Application identity is required.' >&2; exit 2;; esac
+for release_arch in arm64 x86_64; do
+  xcrun swift build --package-path "$release_root" --scratch-path "$release_output/swift-$release_arch" --arch "$release_arch" --jobs 2 -c release --product CodexTaskManager
+  release_bin="$(xcrun swift build --package-path "$release_root" --scratch-path "$release_output/swift-$release_arch" --arch "$release_arch" -c release --show-bin-path)"
+  test -f "$release_bin/CodexTaskManager"
+  install "$release_bin/CodexTaskManager" "$release_output/CodexTaskManager-$release_arch"
+done
+release_app="$release_output/Codex Task Manager.app"
+mkdir -p "$release_app/Contents/MacOS" "$release_app/Contents/Resources"
+cp "$release_root/Support/AppBundle/Info.plist" "$release_app/Contents/Info.plist"
+xcrun lipo -create "$release_output/CodexTaskManager-arm64" "$release_output/CodexTaskManager-x86_64" -output "$release_app/Contents/MacOS/CodexTaskManager"
+chmod 755 "$release_app/Contents/MacOS/CodexTaskManager"
+/usr/bin/codesign --force --timestamp --options runtime --sign "$release_identity" "$release_app"
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$release_app"
+/usr/bin/plutil -lint "$release_app/Contents/Info.plist"
+xcrun lipo -info "$release_app/Contents/MacOS/CodexTaskManager"
+/usr/bin/ditto -c -k --keepParent "$release_app" "$release_output/notarization-input.zip"
+echo "Signed app: $release_app"
+echo 'Notarization is required before public release; follow RELEASING.md.'

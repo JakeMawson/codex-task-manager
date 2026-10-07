@@ -1,0 +1,15 @@
+#!/bin/zsh -f
+set -eu
+
+project_root="${0:A:h:h}"
+"$project_root/Scripts/build-app-bundle" release >&2
+source_bundle="$project_root/build/macos/Codex Task Manager.bundle-staging"
+installed_bundle="/Applications/Codex Task Manager.app"
+launch_services="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+/usr/bin/ditto "$source_bundle" "$installed_bundle"
+/usr/bin/codesign --force --deep --sign - "$installed_bundle"
+"$launch_services" -f "$installed_bundle"
+/usr/bin/touch "$installed_bundle"
+
+print -r -- "$installed_bundle"

@@ -1,0 +1,25 @@
+#!/bin/zsh -f
+set -eu
+
+project_root="${0:A:h:h}"
+configuration="${1:-release}"
+
+case "$configuration" in
+  debug|release) ;;
+  *)
+    print -u2 -- "Usage: Scripts/build-app-bundle [debug|release]"
+    exit 2
+    ;;
+esac
+
+cd "$project_root"
+/usr/bin/swift build -c "$configuration" --product CodexTaskManager
+bin_path="$(/usr/bin/swift build -c "$configuration" --show-bin-path)"
+bundle_path="$project_root/build/macos/Codex Task Manager.bundle-staging"
+
+/bin/mkdir -p "$bundle_path/Contents/MacOS" "$bundle_path/Contents/Resources"
+/usr/bin/install -m 0644 "$project_root/Support/AppBundle/Info.plist" "$bundle_path/Contents/Info.plist"
+/usr/bin/install -m 0755 "$bin_path/CodexTaskManager" "$bundle_path/Contents/MacOS/CodexTaskManager"
+/usr/bin/codesign --force --deep --sign - "$bundle_path"
+
+print -r -- "$bundle_path"

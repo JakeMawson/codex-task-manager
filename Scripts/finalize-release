@@ -1,0 +1,18 @@
+#!/bin/bash
+set -euo pipefail
+if [[ $# != 1 ]]; then echo 'Usage: Scripts/finalize-release /absolute/signed/release/output' >&2; exit 2; fi
+release_output="$1"
+release_app="$release_output/Codex Task Manager.app"
+test -f "$release_output/notarization-input.zip"
+test -f "$release_app/Contents/MacOS/CodexTaskManager"
+# Always use this app's own dedicated profile; do not borrow another product's.
+xcrun notarytool submit "$release_output/notarization-input.zip" --keychain-profile 'Codex Task Manager Notary' --wait
+xcrun stapler staple "$release_app"
+xcrun stapler validate "$release_app"
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$release_app"
+/usr/sbin/spctl --assess --type execute --verbose=2 "$release_app"
+release_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$release_app/Contents/Info.plist")"
+release_archive="$release_output/Codex-Task-Manager-$release_version.zip"
+test ! -e "$release_archive"
+/usr/bin/ditto -c -k --keepParent "$release_app" "$release_archive"
+/usr/bin/shasum -a 256 "$release_archive"
