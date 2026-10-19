@@ -1745,7 +1745,7 @@ struct CodexTaskManagerKitTests {
         #expect(await controller.recordedLiveStateRequestIDs() == [threadID])
     }
 
-    @Test("Background refresh is not gated by companion startup")
+    @Test("Background refresh loads the local catalog without a companion")
     @MainActor
     func backgroundRefreshDoesNotWaitForCompanion() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
@@ -1766,7 +1766,10 @@ struct CodexTaskManagerKitTests {
             approvalController: DelayedStartApprovalController(delay: .seconds(2))
         )
         model.startBackgroundRefresh()
-        try await Task.sleep(for: .milliseconds(500))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while model.tasks.isEmpty && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
         #expect(model.tasks.count == 1)
         #expect(model.tasks.first?.state != .running)
         model.stopBackgroundRefreshForTesting()
