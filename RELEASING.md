@@ -36,10 +36,16 @@ Public source pushes, tags, GitHub release/asset writes and tap changes require 
 
 1. Push the reviewed source commit and matching `v0.2.0` tag.
 2. Publish a stable GitHub release with only the finalized ZIP and its SHA-256 text.
-3. Update the existing `JakeMawson/tap/codex-task-manager` cask to that version and digest. Preserve its publisher, bundle-ID and notarization preflight checks; these run before app installation.
-4. Fetch through Homebrew, compare the exact public digest, then upgrade the installed app. Preserve preferences and Application Support. Recheck both installed identities, universal architectures, strict signatures, stapling, Gatekeeper and version.
+3. Update the existing `JakeMawson/tap/codex-task-manager` cask to that version and digest. Preserve its publisher, bundle-ID and notarization preflight checks; these run before app installation. Use `xcrun stapler validate` for the ticket; `spctl` assessment cannot access its Mach service inside Homebrew’s cask sandbox. The updater assesses Gatekeeper outside that sandbox before relaunch.
+4. Fetch through Homebrew, compare the exact public digest, then upgrade the installed app. Preserve preferences and Application Support. Recheck both installed identities, universal architectures, strict signatures, stapling, Gatekeeper and version. Also run `/usr/bin/gktool scan` against the installed bundle; unlike static assessment, this exercises the execution scan used by ordinary launch.
 5. Launch through the installed outer bundle. Repeat the native visibility, controls, duplicate, quit/relaunch and Settings update-check tests against the installed release.
 
 Inline `codesign -R` requirements must begin with `=` so they are parsed as expressions, rather than filenames. Exercise the exact cask requirement against the signed release before publication, including rejection of an incorrect publisher.
 
 The update client checks only stable numeric tags at the fixed repository endpoint. Release metadata never chooses commands, paths or asset URLs. A release API response is not permission to install arbitrary bytes.
+
+## Retained-directory upgrade diagnosis
+
+On the release Mac, Homebrew retained the 0.1.1 bundle directory while replacing its contents. Version 0.2.0 passed strict signature, stapling, `spctl` and `syspolicy_check distribution`, but its execution scan rejected it. An exact seven-file copy with quarantine preserved passed `gktool scan`; replacing only the installed bundle directory with that copy changed the installed scan to the normal first-open approval state. The original installed bundle was preserved locally. This isolates directory-associated execution-policy state; it does not establish a general Homebrew or macOS defect.
+
+For this symptom, first capture both execution-scan results and verify identical signed bytes and preserved quarantine. A scoped fresh-directory replacement requires local app replacement authority and preservation of preferences/Application Support. Never clear security databases, disable Gatekeeper, remove quarantine, or reset unrelated apps. Verify normal first-open approval, the installed process and visible menu item afterward. Future normal upgrades should be tested before assuming this recovery is necessary.
