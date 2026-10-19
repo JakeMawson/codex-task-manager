@@ -40,4 +40,6 @@ Public source pushes, tags, GitHub release/asset writes and tap changes require 
 4. Fetch through Homebrew, compare the exact public digest, then upgrade the installed app. Preserve preferences and Application Support. Recheck both installed identities, universal architectures, strict signatures, stapling, Gatekeeper and version.
 5. Launch through the installed outer bundle. Repeat the native visibility, controls, duplicate, quit/relaunch and Settings update-check tests against the installed release.
 
+Inline `codesign -R` requirements must begin with `=` so they are parsed as expressions, rather than filenames. Exercise the exact cask requirement against the signed release before publication, including rejection of an incorrect publisher.
+
 The update client checks only stable numeric tags at the fixed repository endpoint. Release metadata never chooses commands, paths or asset URLs. A release API response is not permission to install arbitrary bytes.

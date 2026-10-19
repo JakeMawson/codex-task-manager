@@ -160,7 +160,7 @@ struct HomebrewAppUpdater: AppUpdateInstalling {
               let actual = AppUpdateVersion(raw), actual >= version else { throw AppUpdateError.invalidInstallation }
         let runner = AppUpdateCommandRunner()
         for (path, id) in [(Self.appPath, Self.bundleID), (Self.appPath + "/Contents/Library/LoginItems/CodexTaskManagerMenuAgent.app", Self.agentID)] {
-            _ = try await runner.run("/usr/bin/codesign", arguments: ["--verify", "--deep", "--strict", "-R", "anchor apple generic and identifier \"\(id)\" and certificate leaf[subject.OU] = \"6RWK4446NQ\"", path])
+            _ = try await runner.run("/usr/bin/codesign", arguments: ["--verify", "--deep", "--strict", "-R", "=anchor apple generic and identifier \"\(id)\" and certificate leaf[subject.OU] = \"6RWK4446NQ\"", path])
         }
         _ = try await runner.run("/usr/sbin/spctl", arguments: ["--assess", "--type", "execute", Self.appPath])
     }
