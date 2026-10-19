@@ -12,11 +12,20 @@ case "$configuration" in
     ;;
 esac
 
-cd "$project_root"
-/usr/bin/swift build -c "$configuration" --product CodexTaskManager
-/usr/bin/swift build -c "$configuration" --product CodexTaskManagerLauncher
-bin_path="$(/usr/bin/swift build -c "$configuration" --show-bin-path)"
 bundle_path="$project_root/build/macos/$(/usr/bin/uuidgen)/Codex Task Manager.app"
+python3 - "$project_root" "$bundle_path" <<'PYGUARD'
+from pathlib import Path
+import sys
+root=Path(sys.argv[1]).resolve(); app=Path(sys.argv[2])
+if app != app.resolve() or app.exists() or not app.is_relative_to(root/'build'/'macos'):
+    raise SystemExit('Refusing a non-fresh or symlinked build output.')
+for parent in app.parents:
+    if parent.is_symlink(): raise SystemExit('Symlink output ancestors are refused.')
+PYGUARD
+cd "$project_root"
+/usr/bin/swift build --jobs 2 -c "$configuration" --product CodexTaskManager
+/usr/bin/swift build --jobs 2 -c "$configuration" --product CodexTaskManagerLauncher
+bin_path="$(/usr/bin/swift build -c "$configuration" --show-bin-path)"
 test ! -e "$bundle_path"
 agent_path="$bundle_path/Contents/Library/LoginItems/CodexTaskManagerMenuAgent.app"
 

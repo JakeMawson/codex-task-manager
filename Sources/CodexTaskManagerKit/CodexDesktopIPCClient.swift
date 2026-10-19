@@ -3,14 +3,68 @@ import Darwin
 
 actor CodexDesktopIPCClient {
     private let socketPath: String
+    private var connectedHandleForTesting: FileHandle?
+    private let requestTimeout: Duration
     private var socketHandle: FileHandle?
+    private var readerTask: Task<Void, Never>?
+    private var inputContinuation: AsyncStream<Data>.Continuation?
+    private var connectionID = UUID()
     private var incomingBuffer = Data()
     private var clientID = "initializing-client"
     private var pendingRequests: [String: CheckedContinuation<[String: JSONValue], Error>] = [:]
+    private var requestTimeouts: [String: Task<Void, Never>] = [:]
+    private var starting: Task<Void, Error>?
+    private var snapshots: [String: CheckedContinuation<TaskAttentionState?, Never>] = [:]
+    private var snapshotTimeouts: [String: Task<Void, Never>] = [:]
+
+    static func attentionState(in state: [String: JSONValue]) -> TaskAttentionState? {
+        guard let runtime = state["threadRuntimeStatus"]?.objectValue,
+              let type = runtime["type"]?.stringValue else { return nil }
+        guard type == "active" else { return ["idle", "notLoaded", "systemError"].contains(type) ? .idle : nil }
+        let flags = Set(runtime["activeFlags"]?.arrayValue?.compactMap(\.stringValue) ?? [])
+        if flags.contains("waitingOnApproval") { return .needsApproval }
+        if flags.contains("waitingOnUserInput") { return .needsResponse }
+        return .running
+    }
+
+    func attentionState(for threadID: String) async throws -> TaskAttentionState? {
+        guard try await ownerClientID(for: threadID) != nil else { return .idle }
+        // Observe the actual Desktop owner. Resuming the same thread on a
+        // separate daemon does not report that owner's runtime state.
+        let result = await withCheckedContinuation { continuation in
+            snapshots.removeValue(forKey: threadID)?.resume(returning: nil)
+            snapshots[threadID] = continuation
+            snapshotTimeouts.removeValue(forKey: threadID)?.cancel()
+            snapshotTimeouts[threadID] = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                await self?.finishSnapshot(threadID, state: nil)
+            }
+            do { try following(threadID, true) }
+            catch { finishSnapshot(threadID, state: nil) }
+        }
+        return result
+    }
+
+    private func following(_ threadID: String, _ enabled: Bool) throws {
+        try send(.object([
+            "type": .string("broadcast"), "sourceClientId": .string(clientID),
+            "version": .int(1), "method": .string("thread-stream-following-changed"),
+            "params": .object(["conversationId": .string(threadID), "hostId": .string("local"), "following": .bool(enabled)]),
+        ]))
+    }
+
+    private func finishSnapshot(_ id: String, state: TaskAttentionState?) {
+        guard let continuation = snapshots.removeValue(forKey: id) else { return }
+        snapshotTimeouts.removeValue(forKey: id)?.cancel()
+        try? following(id, false)
+        continuation.resume(returning: state)
+    }
 
     init(socketPath: String = FileManager.default.homeDirectoryForCurrentUser
-        .appending(path: ".codex/ipc/ipc.sock").path) {
+        .appending(path: ".codex/ipc/ipc.sock").path, connectedHandleForTesting: FileHandle? = nil, requestTimeout: Duration = .seconds(5)) {
         self.socketPath = socketPath
+        self.connectedHandleForTesting = connectedHandleForTesting
+        self.requestTimeout = requestTimeout
     }
 
     func ownerClientID(for threadID: String) async throws -> String? {
@@ -29,57 +83,10 @@ actor CodexDesktopIPCClient {
                 response["error"]?.stringValue ?? "Desktop task owner discovery failed."
             )
         }
-        return response["handledByClientId"]?.stringValue
-    }
-
-    func applyAllowAllSettings(threadID: String, ownerClientID: String) async throws {
-        try requireSuccess(try await request(
-            method: "thread-follower-update-thread-settings",
-            params: .object([
-                "conversationId": .string(threadID),
-                "threadSettings": Self.allowAllSettings,
-            ]),
-            version: 1,
-            targetClientID: ownerClientID
-        ))
-    }
-
-    func interruptAndContinue(threadID: String, ownerClientID: String) async throws {
-        // Version 3 is Codex's backwards-compatible interrupt request when no
-        // expected turn id is supplied. The live owner resolves the approval
-        // card and interrupts exactly its current turn.
-        try requireSuccess(try await request(
-            method: "thread-follower-interrupt-turn",
-            params: .object([
-                "conversationId": .string(threadID),
-                "mode": .string("user"),
-            ]),
-            version: 3,
-            targetClientID: ownerClientID
-        ))
-
-        // Reapply after interruption so both the persisted next-turn settings
-        // and the explicit recovery turn use task-scoped full access.
-        try await applyAllowAllSettings(threadID: threadID, ownerClientID: ownerClientID)
-        try requireSuccess(try await request(
-            method: "thread-follower-start-turn",
-            params: .object([
-                "conversationId": .string(threadID),
-                "turnStartParams": .object([
-                    "input": .array([
-                        .object([
-                            "type": .string("text"),
-                            "text": .string("Apologies for the interruption - all commands are auto-accepted now. Continue on where you were"),
-                        ]),
-                    ]),
-                    "approvalPolicy": .string("never"),
-                    "approvalsReviewer": .string("auto_review"),
-                    "sandboxPolicy": .object(["type": .string("dangerFullAccess")]),
-                ]),
-            ]),
-            version: 1,
-            targetClientID: ownerClientID
-        ))
+        guard let owner = response["handledByClientId"]?.stringValue, !owner.isEmpty else {
+            throw TaskApprovalControllerError.protocolError("Codex returned an invalid task owner.")
+        }
+        return owner
     }
 
     static func userStopRequest(threadID: String) -> (params: JSONValue, version: Int) {
@@ -88,7 +95,7 @@ actor CodexDesktopIPCClient {
                 "conversationId": .string(threadID),
                 "mode": .string("user-stop"),
             ]),
-            version: 4
+            version: 3
         )
     }
 
@@ -106,24 +113,34 @@ actor CodexDesktopIPCClient {
         }
     }
 
-    private static let allowAllSettings: JSONValue = .object([
-        "approvalPolicy": .string("never"),
-        "approvalsReviewer": .string("auto_review"),
-        "sandboxPolicy": .object(["type": .string("dangerFullAccess")]),
-    ])
-
     private func start() async throws {
+        if let starting { return try await starting.value }
         guard socketHandle == nil else { return }
-        let handle = try connectUnixSocket(path: socketPath)
-        handle.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            Task {
-                if data.isEmpty {
-                    await self?.connectionDidClose()
-                } else {
-                    await self?.ingest(data)
-                }
+        let task = Task { try await self.connectAndInitialize() }
+        starting = task
+        defer { starting = nil }
+        do { try await task.value }
+        catch { connectionDidClose(); throw error }
+    }
+
+    private func connectAndInitialize() async throws {
+        let handle = try connectedHandleForTesting ?? connectUnixSocket(path: socketPath)
+        connectedHandleForTesting = nil
+        let generation = UUID()
+        connectionID = generation
+        let (stream, continuation) = AsyncStream<Data>.makeStream(bufferingPolicy: .bufferingOldest(128))
+        inputContinuation = continuation
+        // Consume frames in read order; separate unstructured tasks per chunk
+        // can reorder a split frame on their way into the actor.
+        readerTask = Task { [weak self] in
+            for await data in stream {
+                guard !Task.isCancelled else { return }
+                await self?.receive(data, generation: generation)
             }
+            await self?.receive(Data(), generation: generation)
+        }
+        handle.readabilityHandler = { handle in
+            if case .dropped = continuation.yield(handle.availableData) { continuation.finish() }
         }
         socketHandle = handle
 
@@ -161,20 +178,30 @@ actor CodexDesktopIPCClient {
             "version": .int(version),
             "method": .string(method),
             "params": params,
-            "timeoutMs": .int(10_000),
+            "timeoutMs": .int(5_000),
         ]
         if let targetClientID {
             message["targetClientId"] = .string(targetClientID)
         }
         return try await withCheckedThrowingContinuation { continuation in
             pendingRequests[requestID] = continuation
+            requestTimeouts[requestID] = Task { [weak self] in
+                do { try await Task.sleep(for: self?.requestTimeout ?? .seconds(5)) } catch { return }
+                await self?.expireRequest(requestID)
+            }
             do {
                 try send(.object(message))
             } catch {
                 pendingRequests[requestID] = nil
+                requestTimeouts.removeValue(forKey: requestID)?.cancel()
                 continuation.resume(throwing: error)
             }
         }
+    }
+
+    private func expireRequest(_ id: String) {
+        requestTimeouts[id] = nil
+        pendingRequests.removeValue(forKey: id)?.resume(throwing: TaskApprovalControllerError.protocolError("Desktop request timed out. Try again in Codex."))
     }
 
     private func requireSuccess(_ response: [String: JSONValue]) throws {
@@ -185,13 +212,19 @@ actor CodexDesktopIPCClient {
         }
     }
 
+    private func receive(_ data: Data, generation: UUID) {
+        guard generation == connectionID else { return }
+        if data.isEmpty { connectionDidClose() } else { ingest(data) }
+    }
+
     private func ingest(_ data: Data) {
+        guard incomingBuffer.count + data.count <= 65 * 1024 * 1024 else { connectionDidClose(); return }
         incomingBuffer.append(data)
         while incomingBuffer.count >= 4 {
             let payloadLength = Int(incomingBuffer.withUnsafeBytes {
                 $0.loadUnaligned(as: UInt32.self).littleEndian
             })
-            guard payloadLength > 0, payloadLength <= 256 * 1024 * 1024 else {
+            guard payloadLength > 0, payloadLength <= 64 * 1024 * 1024 else {
                 connectionDidClose()
                 return
             }
@@ -206,9 +239,20 @@ actor CodexDesktopIPCClient {
     }
 
     private func handle(_ message: [String: JSONValue]) {
+        if message["type"]?.stringValue == "broadcast",
+           message["method"]?.stringValue == "thread-stream-state-changed",
+           let params = message["params"]?.objectValue,
+           params["hostId"]?.stringValue == "local",
+           let id = params["conversationId"]?.stringValue,
+           let change = params["change"]?.objectValue,
+           change["type"]?.stringValue == "snapshot",
+           let state = change["conversationState"]?.objectValue {
+            finishSnapshot(id, state: Self.attentionState(in: state))
+        }
         if message["type"]?.stringValue == "response",
            let requestID = message["requestId"]?.stringValue,
            let continuation = pendingRequests.removeValue(forKey: requestID) {
+            requestTimeouts.removeValue(forKey: requestID)?.cancel()
             continuation.resume(returning: message)
             return
         }
@@ -232,6 +276,11 @@ actor CodexDesktopIPCClient {
     }
 
     private func connectionDidClose() {
+        connectionID = UUID()
+        inputContinuation?.finish()
+        inputContinuation = nil
+        readerTask?.cancel()
+        readerTask = nil
         socketHandle?.readabilityHandler = nil
         try? socketHandle?.close()
         socketHandle = nil
@@ -239,6 +288,13 @@ actor CodexDesktopIPCClient {
         clientID = "initializing-client"
         let continuations = pendingRequests.values
         pendingRequests.removeAll()
+        for task in requestTimeouts.values { task.cancel() }
+        requestTimeouts.removeAll()
+        let observers = Array(snapshots.values)
+        snapshots.removeAll()
+        for task in snapshotTimeouts.values { task.cancel() }
+        snapshotTimeouts.removeAll()
+        for observer in observers { observer.resume(returning: nil) }
         for continuation in continuations {
             continuation.resume(throwing: TaskApprovalControllerError.connectionClosed)
         }
@@ -247,6 +303,11 @@ actor CodexDesktopIPCClient {
     private func connectUnixSocket(path: String) throws -> FileHandle {
         let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw TaskApprovalControllerError.connectionClosed }
+        var noSignal: Int32 = 1
+        guard fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0,
+              setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            Darwin.close(descriptor); throw TaskApprovalControllerError.connectionClosed
+        }
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let maximumPathLength = MemoryLayout.size(ofValue: address.sun_path)
@@ -267,6 +328,10 @@ actor CodexDesktopIPCClient {
         guard result == 0 else {
             Darwin.close(descriptor)
             throw TaskApprovalControllerError.connectionClosed
+        }
+        var peerUID: uid_t = 0, peerGID: gid_t = 0
+        guard getpeereid(descriptor, &peerUID, &peerGID) == 0, peerUID == geteuid() else {
+            Darwin.close(descriptor); throw TaskApprovalControllerError.connectionClosed
         }
         return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
     }

@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem?
     private lazy var statusPopover = NSPopover()
+    private var settingsWindow: NSWindow?
     private var previewWindow: NSWindow?
     private var statusRefreshTimer: Timer?
     private var registrationAttempt = 0
@@ -45,6 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self, selector: #selector(showTasks(_:)), name: Self.reopenNotification, object: nil
         )
         installStatusItem()
+        if !CommandLine.arguments.contains(where: { $0.hasPrefix("--qa-") }) {
+            AppUpdateModel.shared.start()
+        }
     }
 
     private func handOffToExistingInstance() -> Bool {
@@ -67,6 +71,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "Codex Task Manager")
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        settings.target = self
+        appMenu.addItem(settings)
+        appMenu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Codex Task Manager", action: #selector(quitApplication(_:)), keyEquivalent: "q")
         quit.target = self
         appMenu.addItem(quit)
@@ -337,6 +345,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let refreshItem = NSMenuItem(title: "Refresh tasks", action: #selector(refreshTasks(_:)), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
         menu.addItem(.separator())
         let quitItem = NSMenuItem(
             title: "Quit Codex Task Manager",
@@ -346,6 +357,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height), in: button)
+    }
+
+    @objc private func showSettings(_ sender: Any?) {
+        statusPopover.close()
+        if let settingsWindow { settingsWindow.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
+        let controller = NSHostingController(rootView: AppUpdateSettings(onClose: { [weak self] in self?.settingsWindow?.close() }))
+        let window = NSWindow(contentViewController: controller)
+        window.title = "Codex Task Manager Settings"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        window.center(); window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow = window
     }
 
     @objc private func quitApplication(_ sender: Any?) {

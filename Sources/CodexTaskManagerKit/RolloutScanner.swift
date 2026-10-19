@@ -7,12 +7,14 @@ struct PendingRolloutRequest: Sendable {
 struct RolloutScanState: Sendable {
     var latestAssistantMessage: String?
     var latestAssistantMessageDate: Date?
+    var latestTurnStartDate: Date?
     var latestUserMessageDate: Date?
     var completionDate: Date?
     var latestRecordDate: Date?
     var isDesktopManaged = false
     var pendingApprovalCalls: [String: PendingRolloutRequest] = [:]
     var pendingInputCalls: [String: PendingRolloutRequest] = [:]
+    var terminalTurn = false
     var isRunning = false
     var parsedLine = false
     var pendingLine = Data()
@@ -22,6 +24,7 @@ struct RolloutScanState: Sendable {
             latestAssistantMessage: latestAssistantMessage,
             latestAssistantMessageDate: latestAssistantMessageDate,
             latestUserMessageDate: latestUserMessageDate,
+            latestTurnStartDate: latestTurnStartDate,
             attentionRequestDate: (
                 pendingApprovalCalls.values.compactMap(\.requestedAt)
                     + pendingInputCalls.values.compactMap(\.requestedAt)
@@ -90,7 +93,7 @@ public enum RolloutScanner {
         }
 
         let expandedData = try tailData(fileURL: fileURL, throughOffset: size, maximumBytes: maximumTailBytes)
-        return parse(expandedData, startsMidFile: size > UInt64(expandedData.count))
+        return parse(expandedData, startsMidFile: size > UInt64(expandedData.count), initialState: initialState)
     }
 
     private static func hasRequiredRecency(in state: RolloutScanState) -> Bool {
@@ -165,16 +168,20 @@ public enum RolloutScanner {
             if type == "event_msg" {
                 switch payloadType {
                 case "agent_message":
-                    state.isRunning = true
+                    if !state.terminalTurn { state.isRunning = true }
                     if let message = payload["message"] as? String {
                         state.latestAssistantMessage = compact(message)
                         state.latestAssistantMessageDate = recordDate
                     }
-                case "task_started":
+                case "task_started", "user_message":
+                    state.latestTurnStartDate = recordDate
+                    state.terminalTurn = false
                     state.isRunning = true
+                    state.pendingApprovalCalls.removeAll()
                     state.pendingInputCalls.removeAll()
                     state.completionDate = nil
                 case "task_complete", "turn_aborted":
+                    state.terminalTurn = true
                     state.isRunning = false
                     state.completionDate = recordDate
                     state.pendingApprovalCalls.removeAll()
@@ -182,7 +189,7 @@ public enum RolloutScanner {
                 case "token_count", "agent_reasoning", "thread_settings_applied":
                     break
                 default:
-                    state.isRunning = true
+                    break
                 }
             }
 
@@ -192,11 +199,40 @@ public enum RolloutScanner {
             }
 
             if type == "response_item" {
-                state.isRunning = true
+                // Metadata and tool outputs may be appended after completion.
+                // They cannot resurrect a terminal turn.
+                if payloadType == "message", payload["role"] as? String == "user" {
+                    state.terminalTurn = false
+                    state.completionDate = nil
+                    state.pendingApprovalCalls.removeAll()
+                    state.pendingInputCalls.removeAll()
+                    state.isRunning = true
+                }
+                if !state.terminalTurn && ["reasoning", "function_call", "custom_tool_call"].contains(payloadType ?? "") {
+                    state.isRunning = true
+                }
+
+                if payloadType == "message", payload["role"] as? String == "assistant" {
+                    let content = payload["content"] as? [[String: Any]] ?? []
+                    let text = content.compactMap { $0["text"] as? String }.joined(separator: " ")
+                    if !text.isEmpty {
+                        state.latestAssistantMessage = compact(text)
+                        state.latestAssistantMessageDate = recordDate
+                    }
+                    if !state.terminalTurn { state.isRunning = true }
+                    if payload["phase"] as? String == "final_answer" {
+                        state.terminalTurn = true
+                        state.isRunning = false
+                        state.completionDate = recordDate
+                        state.pendingApprovalCalls.removeAll()
+                        state.pendingInputCalls.removeAll()
+                    }
+                }
 
                 if payloadType == "message",
                    payload["role"] as? String == "user" {
                     state.latestUserMessageDate = recordDate
+                    state.latestTurnStartDate = recordDate
                 }
 
                 if payloadType == "custom_tool_call",

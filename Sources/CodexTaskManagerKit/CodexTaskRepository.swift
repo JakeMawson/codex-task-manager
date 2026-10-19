@@ -96,6 +96,7 @@ public actor CodexTaskRepository {
     private var cachedTitleIndexSignature: FileSignature?
     private var unreadCache: Set<String>?
     private var cachedUnreadSignature: FileSignature?
+    private var latestTurnStartDates: [String: Date] = [:]
     private var latestReadStateMarkers: [String: Date] = [:]
     private var latestMetrics = CodexTaskLoadMetrics()
     private var desktopRuntimeStartDateCache: (checkedAt: Date, startDate: Date?)?
@@ -142,10 +143,15 @@ public actor CodexTaskRepository {
         let readStateOverrides = try loadReadStateOverrides()
         let snapshotResult = await rolloutSnapshots(for: catalogResult.rows, refresh: hint)
         let desktopRuntimeStartDate = cachedDesktopRuntimeStartDate()
+        let stopped = try loadStoppedTurns()
+        var turnStarts: [String: Date] = [:]
         var readStateMarkers: [String: Date] = [:]
-        let tasks = catalogResult.rows.map { row in
+        let tasks: [CodexTask] = catalogResult.rows.compactMap { row -> CodexTask? in
             let rollout = snapshotResult.snapshots[row.rolloutPath]
                 ?? RolloutSnapshot(latestAssistantMessage: nil, isRunning: false, needsApproval: false, needsResponse: false)
+            let turnStart = rollout.latestTurnStartDate ?? .distantPast
+            turnStarts[row.id] = turnStart
+            if let stoppedTurn = stopped[row.id], turnStart <= stoppedTurn { return nil }
             let catalogRecency = Date(timeIntervalSince1970: Double(row.recencyMilliseconds) / 1_000)
             let readStateMarker = rollout.readStateMarker(fallback: catalogRecency)
             readStateMarkers[row.id] = readStateMarker
@@ -178,11 +184,13 @@ public actor CodexTaskRepository {
                 latestAssistantMessage: rollout.latestAssistantMessage ?? "No assistant message yet.",
                 recency: rollout.recencyDate(for: state, fallback: catalogRecency),
                 isPinned: row.isPinned,
+                isUnread: isUnread,
                 isDesktopManaged: isDesktopManaged,
                 state: state
             )
         }
         latestReadStateMarkers = readStateMarkers
+        latestTurnStartDates = turnStarts
         latestMetrics = CodexTaskLoadMetrics(
             taskCount: tasks.count,
             catalogReloaded: catalogResult.reloaded,
@@ -199,6 +207,20 @@ public actor CodexTaskRepository {
 
     public func loadUnreadTaskIDs() throws -> Set<String> {
         try readUnreadTaskIDs()
+    }
+
+    private var stoppedTurnsURL: URL {
+        readStateOverrideURL.deletingLastPathComponent().appending(path: "task-manager-stopped-turns.json")
+    }
+    private func loadStoppedTurns() throws -> [String: Date] {
+        guard FileManager.default.fileExists(atPath: stoppedTurnsURL.path) else { return [:] }
+        return try JSONDecoder().decode([String: Date].self, from: Data(contentsOf: stoppedTurnsURL))
+    }
+    public func dismissStoppedTask(_ id: String) throws {
+        var turns = try loadStoppedTurns()
+        turns[id] = latestTurnStartDates[id] ?? .distantPast
+        try FileManager.default.createDirectory(at: stoppedTurnsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(turns).write(to: stoppedTurnsURL, options: .atomic)
     }
 
     public func setTaskUnread(_ taskID: String, unread: Bool, observedMarker: Date = Date()) throws {

@@ -1,15 +1,29 @@
 #!/bin/zsh -f
-set -eu
+set -euo pipefail
 
 project_root="${0:A:h:h}"
-"$project_root/Scripts/build-app-bundle" release >&2
-source_bundle="$project_root/build/macos/Codex Task Manager.bundle-staging"
 installed_bundle="/Applications/Codex Task Manager.app"
 launch_services="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
+# A local development install must never merge over an existing signed app.
+# Existing/Homebrew installations are upgraded through their trusted cask.
+if [[ -e "$installed_bundle" || -L "$installed_bundle" ]]; then
+  print -u2 -- 'An app already exists at /Applications/Codex Task Manager.app. Use Homebrew to upgrade it; open the fresh build path for development QA.'
+  exit 1
+fi
+source_bundle="$("$project_root/Scripts/build-app-bundle" release | /usr/bin/tail -n 1)"
+python3 - "$project_root" "$source_bundle" <<'PY'
+from pathlib import Path
+import plistlib, sys
+root=Path(sys.argv[1]).resolve(); app=Path(sys.argv[2])
+if not app.is_absolute() or app != app.resolve() or not app.is_relative_to(root/'build'/'macos') or app.name != 'Codex Task Manager.app':
+    raise SystemExit('The build did not return a safe fresh application bundle.')
+with (app/'Contents'/'Info.plist').open('rb') as f:
+    if plistlib.load(f).get('CFBundleIdentifier') != 'com.jakemawson.codex-task-manager.launcher':
+        raise SystemExit('Unexpected application identity.')
+PY
+/usr/bin/codesign --verify --deep --strict "$source_bundle"
 /usr/bin/ditto "$source_bundle" "$installed_bundle"
-/usr/bin/codesign --force --deep --sign - "$installed_bundle"
+/usr/bin/codesign --verify --deep --strict "$installed_bundle"
 "$launch_services" -f "$installed_bundle"
-/usr/bin/touch "$installed_bundle"
-
 print -r -- "$installed_bundle"

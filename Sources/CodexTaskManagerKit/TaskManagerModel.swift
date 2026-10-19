@@ -117,8 +117,6 @@ public final class TaskManagerModel {
     private var isRefreshing = false
     private var pendingRefreshHint = TaskRefreshHint.none
     private var refreshLoopTask: Task<Void, Never>?
-    private var approvalCompanionStartTask: Task<Void, Never>?
-    private var pausedStateOverrideUntil: [String: Date] = [:]
     private var pinOverrides: [String: Bool]
     private var sourcePinStates: [String: Bool] = [:]
 
@@ -324,12 +322,6 @@ public final class TaskManagerModel {
 
     public func startBackgroundRefresh() {
         guard fixtureName == nil, refreshLoopTask == nil else { return }
-        if approvalCompanionStartTask == nil {
-            approvalCompanionStartTask = Task { [weak self] in
-                await self?.startApprovalCompanion()
-                self?.approvalCompanionStartTask = nil
-            }
-        }
         refreshLoopTask = Task { [weak self] in
             await self?.runRefreshLoop()
         }
@@ -338,19 +330,6 @@ public final class TaskManagerModel {
     func stopBackgroundRefreshForTesting() {
         refreshLoopTask?.cancel()
         refreshLoopTask = nil
-        approvalCompanionStartTask?.cancel()
-        approvalCompanionStartTask = nil
-    }
-
-    private func startApprovalCompanion() async {
-        guard let approvalController else { return }
-        do {
-            try await approvalController.start()
-            approvalMessage = "CODEX APPROVAL COMPANION READY"
-        } catch {
-            approvalMessage = nil
-            errorMessage = error.localizedDescription
-        }
     }
 
     private func runRefreshLoop() async {
@@ -424,9 +403,6 @@ public final class TaskManagerModel {
                     reconcilePinnedProjectOrder()
                     reconcilePinnedTaskOrder()
                 }
-                await approvalController?.subscribe(
-                    to: refreshedTasks.lazy.filter { $0.state == .needsApproval }.map(\.id)
-                )
                 errorMessage = nil
                 lastRefresh = Date()
             } catch {
@@ -437,36 +413,29 @@ public final class TaskManagerModel {
 
     private func reconcileLiveApprovalStates(in scannedTasks: [CodexTask]) async -> [CodexTask] {
         guard let approvalController else { return scannedTasks }
-        let sharedRuntimeIsAuthoritative = await approvalController.liveApprovalStateIsAuthoritative()
         var reconciled = scannedTasks
-        for index in reconciled.indices where reconciled[index].state == .needsApproval
-            || (reconciled[index].state == .running && !reconciled[index].isDesktopManaged) {
-            guard sharedRuntimeIsAuthoritative || !reconciled[index].isDesktopManaged else {
-                continue
+        // Only positive rollout states need live reconciliation. Bound concurrency
+        // so a stale catalogue cannot issue thousands of simultaneous IPC reads.
+        let candidates = scannedTasks.filter { [.running, .needsApproval, .needsResponse].contains($0.state) }
+        var live: [String: TaskAttentionState] = [:]
+        await withTaskGroup(of: (String, TaskAttentionState?).self) { group in
+            var iterator = candidates.makeIterator()
+            for _ in 0..<min(8, candidates.count) {
+                if let task = iterator.next() {
+                    group.addTask { (task.id, await approvalController.liveAttentionState(for: task.id, isDesktopManaged: task.isDesktopManaged)) }
+                }
             }
-            guard let liveState = await approvalController.liveAttentionState(for: reconciled[index].id),
-                  liveState != .needsApproval
-            else { continue }
-            let task = reconciled[index]
-            reconciled[index] = CodexTask(
-                id: task.id,
-                title: task.title,
-                projectPath: task.projectPath,
-                latestAssistantMessage: task.latestAssistantMessage,
-                recency: task.recency,
-                isPinned: task.isPinned,
-                isDesktopManaged: task.isDesktopManaged,
-                state: liveState
-            )
+            while let (id, state) = await group.next() {
+                if let state { live[id] = state }
+                if let task = iterator.next() {
+                    group.addTask { (task.id, await approvalController.liveAttentionState(for: task.id, isDesktopManaged: task.isDesktopManaged)) }
+                }
+            }
         }
-        let now = Date()
         for index in reconciled.indices {
             let task = reconciled[index]
-            guard let overrideUntil = pausedStateOverrideUntil[task.id] else { continue }
-            if task.state == .running, now < overrideUntil {
-                reconciled[index] = task.replacingState(.complete)
-            } else {
-                pausedStateOverrideUntil[task.id] = nil
+            if let state = live[task.id] {
+                reconciled[index] = task.replacingState(state == .idle && task.isUnread ? .complete : state)
             }
         }
         return reconciled
@@ -503,33 +472,8 @@ public final class TaskManagerModel {
         }
     }
 
-    public func performApprovalAction(_ action: TaskApprovalAction, for task: CodexTask) async {
-        guard task.state == .needsApproval, let approvalController else { return }
-        guard !approvalActionsInFlight.contains(task.id) else { return }
-        approvalActionsInFlight.insert(task.id)
-        defer { approvalActionsInFlight.remove(task.id) }
-
-        do {
-            try await approvalController.perform(action, for: task.id)
-            errorMessage = nil
-            #if CODEX_TASK_MANAGER_EXPERIMENTAL_APPROVAL_ACTIONS
-            approvalMessage = switch action {
-            case .allowOnce: "ALLOWED ONCE — \(task.title)"
-            case .allowSimilarCommands: "SIMILAR COMMANDS ALLOWED — \(task.title)"
-            case .allowAllForTask: "TASK-SCOPED ACCESS ENABLED — \(task.title)"
-            }
-            #else
-            approvalMessage = "TASK-SCOPED ACCESS ENABLED — \(task.title)"
-            #endif
-            await refresh(silent: true)
-        } catch {
-            approvalMessage = nil
-            errorMessage = error.localizedDescription
-        }
-    }
-
     public func pause(_ task: CodexTask) async {
-        guard task.state == .running,
+        guard [.running, .needsApproval, .needsResponse].contains(task.state),
               let approvalController,
               let repository
         else { return }
@@ -537,7 +481,7 @@ public final class TaskManagerModel {
         do {
             try await pauseTask(task, approvalController: approvalController, repository: repository)
             errorMessage = nil
-            approvalMessage = "TASK PAUSED — \(task.title)"
+            approvalMessage = "TASK STOPPED — \(task.title)"
         } catch {
             approvalMessage = nil
             errorMessage = error.localizedDescription
@@ -584,7 +528,7 @@ public final class TaskManagerModel {
             }
         }
         finishProjectBatch(
-            action: "PAUSED",
+            action: "STOPPED",
             successCount: pausedCount,
             attemptedCount: candidates.count,
             projectPath: projectPath,
@@ -636,11 +580,11 @@ public final class TaskManagerModel {
         approvalActionsInFlight.insert(task.id)
         defer { approvalActionsInFlight.remove(task.id) }
 
-        try await approvalController.pause(threadID: task.id)
-        try await repository.setTaskUnread(task.id, unread: true, observedMarker: task.recency)
-        pausedStateOverrideUntil[task.id] = Date().addingTimeInterval(10)
+        try await approvalController.pause(threadID: task.id, isDesktopManaged: task.isDesktopManaged)
+        try await repository.setTaskUnread(task.id, unread: false, observedMarker: task.recency)
+        try await repository.dismissStoppedTask(task.id)
         if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-            tasks[index] = tasks[index].replacingState(.complete)
+            tasks.remove(at: index)
         }
     }
 
@@ -650,7 +594,6 @@ public final class TaskManagerModel {
         defer { approvalActionsInFlight.remove(task.id) }
 
         try await repository.setTaskUnread(task.id, unread: false, observedMarker: task.recency)
-        pausedStateOverrideUntil[task.id] = nil
         if let index = tasks.firstIndex(where: { $0.id == task.id }) {
             tasks[index] = tasks[index].replacingState(.idle)
         }

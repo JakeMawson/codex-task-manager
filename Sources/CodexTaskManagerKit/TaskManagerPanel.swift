@@ -3,6 +3,7 @@ import SwiftUI
 public struct TaskManagerPanel: View {
     @Bindable private var model: TaskManagerModel
     @State private var showsProjectArrangement = false
+    @State private var showsSettings = false
 
     public init(model: TaskManagerModel) {
         self.model = model
@@ -21,6 +22,7 @@ public struct TaskManagerPanel: View {
         .task {
             model.startBackgroundRefresh()
         }
+        .sheet(isPresented: $showsSettings) { AppUpdateSettings() }
         .sheet(isPresented: $showsProjectArrangement) {
             ProjectOrderView(model: model)
         }
@@ -40,6 +42,12 @@ public struct TaskManagerPanel: View {
                 }
 
                 Spacer(minLength: 8)
+                Button { showsSettings = true } label: {
+                    Image(systemName: "gearshape").frame(width: 28, height: 31)
+                }
+                .buttonStyle(.plain).foregroundStyle(TaskManagerPalette.secondary)
+                .help("Settings and updates").accessibilityLabel("Settings and updates")
+
 
                 Button {
                     Task { await model.refresh() }
@@ -450,7 +458,7 @@ public struct TaskManagerPanel: View {
             Button {
                 Task { await model.pauseAllTasks(in: path) }
             } label: {
-                Label("Pause all tasks", systemImage: "pause.circle")
+                Label("Stop running tasks", systemImage: "stop.circle")
             }
             .disabled(model.projectRunningCount(path) == 0)
         }
@@ -574,38 +582,13 @@ public struct TaskManagerPanel: View {
 
         switch task.state {
         case .needsApproval:
-            // Experimental external callback actions are deliberately not
-            // exposed here. Codex's own Allow once / Allow similar commands
-            // buttons own the original callback and are therefore more
-            // reliable. The disabled reference UI and controller code are
-            // retained behind CODEX_TASK_MANAGER_EXPERIMENTAL_APPROVAL_ACTIONS
-            // for a future revisit.
-            /*
-            Button {
-                Task { await model.performApprovalAction(.allowOnce, for: task) }
-            } label: {
-                Label("Allow once", systemImage: "checkmark.circle")
-            }
-
-            Button {
-                Task { await model.performApprovalAction(.allowSimilarCommands, for: task) }
-            } label: {
-                Label("Allow similar commands", systemImage: "text.line.first.and.arrowtriangle.forward")
-            }
-
-            Divider()
-            */
-
-            Button {
-                Task { await model.performApprovalAction(.allowAllForTask, for: task) }
-            } label: {
-                Label("Allow all commands for this task", systemImage: "checkmark.shield")
-            }
+            Button("Open approval in Codex", systemImage: "arrow.up.forward.app") { model.open(task) }
+            Button("Stop task", systemImage: "stop.circle") { Task { await model.pause(task) } }
         case .running:
             Button {
                 Task { await model.pause(task) }
             } label: {
-                Label("Pause task", systemImage: "pause.circle")
+                Label("Stop task", systemImage: "stop.circle")
             }
         case .complete:
             Button {
@@ -613,7 +596,9 @@ public struct TaskManagerPanel: View {
             } label: {
                 Label("Mark as read", systemImage: "envelope.open")
             }
-        case .needsResponse, .idle:
+        case .needsResponse:
+            Button("Stop task", systemImage: "stop.circle") { Task { await model.pause(task) } }
+        case .idle:
             EmptyView()
         }
     }
@@ -689,7 +674,7 @@ public struct TaskManagerPanel: View {
             Circle()
                 .fill(model.errorMessage == nil ? TaskManagerPalette.mineralTeal : TaskManagerPalette.danger)
                 .frame(width: 5, height: 5)
-            Text(model.errorMessage ?? model.approvalMessage ?? "LOCAL CODEX COMPANION")
+            Text(model.errorMessage ?? model.approvalMessage ?? "LOCAL TASK MONITOR")
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer()

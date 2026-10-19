@@ -35,7 +35,6 @@ private actor RecordingApprovalController: TaskApprovalControlling {
         liveStateRequestIDs.append(threadID)
         return liveStates[threadID]
     }
-    func perform(_ action: TaskApprovalAction, for threadID: String) async throws {}
 
     func pause(threadID: String) async throws {
         pausedIDs.append(threadID)
@@ -57,7 +56,6 @@ private actor DelayedStartApprovalController: TaskApprovalControlling {
     func subscribe(to threadIDs: [String]) async {}
     func liveApprovalStateIsAuthoritative() async -> Bool { false }
     func liveAttentionState(for threadID: String) async -> TaskAttentionState? { nil }
-    func perform(_ action: TaskApprovalAction, for threadID: String) async throws {}
     func pause(threadID: String) async throws {}
 }
 
@@ -780,16 +778,18 @@ struct CodexTaskManagerKitTests {
         #expect(model.approvalMessage == "MARKED AS READ — 2 TASKS IN A")
         #expect(model.errorMessage == nil)
 
+        let stoppedID = model.tasks[4].id, failedID = model.tasks[5].id
+        let responseID = model.tasks[6].id, otherID = model.tasks[7].id
         await model.pauseAllTasks(in: "/A")
-        #expect(await controller.recordedPauseIDs() == [model.tasks[4].id, model.tasks[5].id])
-        #expect(model.tasks[4].state == .complete)
-        #expect(model.tasks[5].state == .running)
-        #expect(model.tasks[6].state == .needsResponse)
-        #expect(model.tasks[7].state == .running)
-        #expect(try await repository.readStateOverride(for: model.tasks[4].id)?.unread == true)
+        #expect(await controller.recordedPauseIDs() == [stoppedID, failedID])
+        #expect(!model.tasks.contains { $0.id == stoppedID })
+        #expect(model.tasks.first { $0.id == failedID }?.state == .running)
+        #expect(model.tasks.first { $0.id == responseID }?.state == .needsResponse)
+        #expect(model.tasks.first { $0.id == otherID }?.state == .running)
+        #expect(try await repository.readStateOverride(for: stoppedID)?.unread == false)
         #expect(model.projectRunningCount("/A") == 1)
         #expect(model.projectRunningCount("/B") == 1)
-        #expect(model.approvalMessage == "PAUSED — 1 TASK IN A")
+        #expect(model.approvalMessage == "STOPPED — 1 TASK IN A")
         #expect(model.errorMessage?.contains("1 of 2 project tasks failed") == true)
         #expect(model.approvalActionsInFlight.isEmpty)
     }
@@ -1152,7 +1152,7 @@ struct CodexTaskManagerKitTests {
         #expect(!resolved.needsApproval)
     }
 
-    @Test("A later turn preserves unresolved approvals until a real terminal event")
+    @Test("A new turn clears stale approval callbacks from the previous turn")
     func rolloutApprovalTurnBoundaries() throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1173,7 +1173,7 @@ struct CodexTaskManagerKitTests {
         ], to: url)
         var snapshot = try RolloutScanner.scan(fileURL: url)
         #expect(snapshot.isRunning)
-        #expect(snapshot.needsApproval)
+        #expect(!snapshot.needsApproval)
 
         try write([
             line(type: "event_msg", payload: ["type": "task_started"]),
@@ -1491,24 +1491,10 @@ struct CodexTaskManagerKitTests {
         #expect((settingsObject?["sandboxPolicy"] as? [String: Any])?["type"] as? String == "dangerFullAccess")
     }
 
-    @Test("Pause selects only the newest in-progress turn")
-    func pauseTurnSelection() {
-        let response = JSONValue.object([
-            "thread": .object([
-                "turns": .array([
-                    .object(["id": .string("completed"), "status": .string("completed")]),
-                    .object(["id": .string("active"), "status": .string("inProgress")]),
-                ]),
-            ]),
-        ])
-        #expect(CodexTaskApprovalController.inProgressTurnID(in: response) == "active")
-        #expect(CodexTaskApprovalController.inProgressTurnID(in: .object([:])) == nil)
-    }
-
     @Test("Desktop pause uses owner-side user-stop semantics")
     func desktopPauseRequest() {
         let request = CodexDesktopIPCClient.userStopRequest(threadID: "thread-123")
-        #expect(request.version == 4)
+        #expect(request.version == 3)
         #expect(request.params.objectValue?["conversationId"]?.stringValue == "thread-123")
         #expect(request.params.objectValue?["mode"]?.stringValue == "user-stop")
     }
@@ -1552,19 +1538,6 @@ struct CodexTaskManagerKitTests {
         #expect(byHost?["remote-host"] as? [String] == ["remote"])
     }
 
-    @Test("Task-scoped allow-all crosses a live approval when explicitly enabled")
-    func liveTaskScopedAllowAll() async throws {
-        guard let threadID = ProcessInfo.processInfo.environment["CODEX_TASK_MANAGER_ALLOW_ALL_TEST_THREAD_ID"],
-              !threadID.isEmpty
-        else { return }
-
-        let suiteName = "CodexTaskManagerKitTests.allowAll.\(UUID().uuidString)"
-        let controller = CodexTaskApprovalController(
-            defaults: try #require(UserDefaults(suiteName: suiteName))
-        )
-        try await controller.perform(.allowAllForTask, for: threadID)
-    }
-
     @Test("Pause interrupts a live task when explicitly enabled")
     func liveTaskPause() async throws {
         guard let threadID = ProcessInfo.processInfo.environment["CODEX_TASK_MANAGER_PAUSE_TEST_THREAD_ID"],
@@ -1574,77 +1547,6 @@ struct CodexTaskManagerKitTests {
             defaults: try #require(UserDefaults(suiteName: "CodexTaskManagerKitTests.pause.\(UUID().uuidString)"))
         )
         try await controller.pause(threadID: threadID)
-    }
-
-    @Test("Task-scoped allow-all suppresses immediate duplicate recovery")
-    func taskScopedAllowAllDebounce() {
-        #expect(!CodexTaskApprovalController.shouldSuppressAllowAllRecovery(elapsed: nil))
-        #expect(CodexTaskApprovalController.shouldSuppressAllowAllRecovery(elapsed: .zero))
-        #expect(CodexTaskApprovalController.shouldSuppressAllowAllRecovery(elapsed: .seconds(9.999)))
-        #expect(!CodexTaskApprovalController.shouldSuppressAllowAllRecovery(elapsed: .seconds(10)))
-        #expect(!CodexTaskApprovalController.shouldSuppressAllowAllRecovery(elapsed: .seconds(30)))
-    }
-
-    #if CODEX_TASK_MANAGER_EXPERIMENTAL_APPROVAL_ACTIONS
-    @Test("Dormant similar-command rules remain task-local and prefix-based")
-    func dormantSimilarCommandMatching() {
-        let taskARules = [["pwd"], ["git", "status"]]
-        let taskBRules = [["swift", "test"]]
-        #expect(CodexTaskApprovalController.matchesSimilarCommand(proposedPrefix: ["pwd"], storedPrefixes: taskARules))
-        #expect(CodexTaskApprovalController.matchesSimilarCommand(proposedPrefix: ["pwd", "-P"], storedPrefixes: taskARules))
-        #expect(CodexTaskApprovalController.matchesSimilarCommand(proposedPrefix: ["git", "status", "--short"], storedPrefixes: taskARules))
-        #expect(!CodexTaskApprovalController.matchesSimilarCommand(proposedPrefix: ["git", "diff"], storedPrefixes: taskARules))
-        #expect(!CodexTaskApprovalController.matchesSimilarCommand(proposedPrefix: ["pwd"], storedPrefixes: taskBRules))
-    }
-    #endif
-
-    @Test("Resolved callbacks and completed turns clear only their matching pending approval")
-    func approvalLifecycleResolutionMatching() {
-        let requestID = JSONValue.int(42)
-        let resolvedParams: [String: JSONValue] = [
-            "threadId": .string("thread-a"),
-            "requestId": requestID,
-        ]
-        #expect(CodexTaskApprovalController.lifecycleNotificationResolvesPendingApproval(
-            method: "serverRequest/resolved",
-            params: resolvedParams,
-            pendingThreadID: "thread-a",
-            pendingTurnID: "turn-a",
-            pendingRequestID: requestID
-        ))
-        #expect(!CodexTaskApprovalController.lifecycleNotificationResolvesPendingApproval(
-            method: "serverRequest/resolved",
-            params: resolvedParams,
-            pendingThreadID: "thread-b",
-            pendingTurnID: "turn-a",
-            pendingRequestID: requestID
-        ))
-        #expect(!CodexTaskApprovalController.lifecycleNotificationResolvesPendingApproval(
-            method: "serverRequest/resolved",
-            params: resolvedParams,
-            pendingThreadID: "thread-a",
-            pendingTurnID: "turn-a",
-            pendingRequestID: .int(43)
-        ))
-
-        let completedParams: [String: JSONValue] = [
-            "threadId": .string("thread-a"),
-            "turn": .object(["id": .string("turn-a")]),
-        ]
-        #expect(CodexTaskApprovalController.lifecycleNotificationResolvesPendingApproval(
-            method: "turn/completed",
-            params: completedParams,
-            pendingThreadID: "thread-a",
-            pendingTurnID: "turn-a",
-            pendingRequestID: requestID
-        ))
-        #expect(!CodexTaskApprovalController.lifecycleNotificationResolvesPendingApproval(
-            method: "turn/completed",
-            params: completedParams,
-            pendingThreadID: "thread-a",
-            pendingTurnID: "turn-b",
-            pendingRequestID: requestID
-        ))
     }
 
     @Test("Private Codex desktop App Server detection is exact")
@@ -1870,10 +1772,100 @@ struct CodexTaskManagerKitTests {
         model.stopBackgroundRefreshForTesting()
     }
 
-    @Test("Companion requests have a bounded timeout and retry cooldown")
-    func companionTimeoutBounds() {
-        #expect(CodexTaskApprovalController.companionRequestTimeout <= .seconds(5))
-        #expect(CodexTaskApprovalController.companionStartRetryDelay <= .seconds(5))
+    @Test("Terminal turns cannot be resurrected by trailing tool output or metadata")
+    func terminalRolloutRecords() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "rollout.jsonl")
+        for terminal in [try line(type: "event_msg", payload: ["type": "task_complete"]),
+                         try line(type: "response_item", payload: ["type": "message", "role": "assistant", "phase": "final_answer", "content": [["type": "output_text", "text": "Done"]]])] {
+            try write([
+                line(type: "event_msg", payload: ["type": "task_started"]), terminal,
+                line(type: "response_item", payload: ["type": "custom_tool_call_output", "call_id": "late"]),
+                line(type: "event_msg", payload: ["type": "background_terminal_output"]),
+                line(type: "response_item", payload: ["type": "message", "role": "developer", "content": []]),
+            ], to: url)
+            #expect(!(try RolloutScanner.scan(fileURL: url)).isRunning)
+            var cursor = try RolloutScanCursor(fileURL: url)
+            try appendText(try line(type: "event_msg", payload: ["type": "agent_message", "message": "Final delivery"]) + "\n", to: url)
+            #expect(!(try cursor.scanAppended(fileURL: url)).isRunning)
+            try appendText(try line(type: "event_msg", payload: ["type": "task_started"]) + "\n", to: url)
+            #expect(try cursor.scanAppended(fileURL: url).isRunning)
+        }
+    }
+
+    @Test("A user message advances turn identity when task_started is missing")
+    func userMessageTurnIdentity() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "rollout.jsonl")
+        func record(_ timestamp: String, _ payload: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: ["timestamp": timestamp, "type": "response_item", "payload": payload]), as: UTF8.self)
+        }
+        try write([
+            record("2026-10-19T12:00:00Z", ["type": "message", "role": "user", "content": []]),
+            record("2026-10-19T12:01:00Z", ["type": "message", "role": "assistant", "phase": "final_answer", "content": []]),
+        ], to: url)
+        var cursor = try RolloutScanCursor(fileURL: url)
+        let previous = cursor.snapshot.latestTurnStartDate
+        try appendText(try record("2026-10-19T12:02:00Z", ["type": "message", "role": "user", "content": []]) + "\n", to: url)
+        let next = try cursor.scanAppended(fileURL: url)
+        #expect(next.isRunning)
+        #expect(try #require(next.latestTurnStartDate) > #require(previous))
+    }
+
+    @Test("Desktop owner snapshots distinguish activity, approvals, input and unknown states")
+    func desktopSnapshotState() {
+        func state(_ type: String, _ flags: [String] = []) -> [String: JSONValue] {
+            ["threadRuntimeStatus": .object(["type": .string(type), "activeFlags": .array(flags.map(JSONValue.string))])]
+        }
+        #expect(CodexDesktopIPCClient.attentionState(in: state("active")) == .running)
+        #expect(CodexDesktopIPCClient.attentionState(in: state("active", ["waitingOnApproval"])) == .needsApproval)
+        #expect(CodexDesktopIPCClient.attentionState(in: state("active", ["waitingOnUserInput"])) == .needsResponse)
+        #expect(CodexDesktopIPCClient.attentionState(in: state("idle")) == .idle)
+        #expect(CodexDesktopIPCClient.attentionState(in: state("notLoaded")) == .idle)
+        #expect(CodexDesktopIPCClient.attentionState(in: state("future")) == nil)
+        #expect(CodexDesktopIPCClient.attentionState(in: [:]) == nil)
+        #expect(CodexDesktopRuntimeDetector.isPrivateDesktopAppServerCommand(["/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex", "app-server", "--listen", "stdio://"]))
+    }
+
+    @Test("Desktop stale approval reconciles despite a private server, and Stop remains dismissed after refresh")
+    @MainActor
+    func desktopStopReconciliation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory.appending(path: "sessions"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let rollout = directory.appending(path: "sessions/rollout.jsonl")
+        try write([
+            line(type: "session_meta", payload: ["originator": "Codex Desktop"]),
+            line(type: "event_msg", payload: ["type": "task_started"]),
+            line(type: "response_item", payload: ["type": "custom_tool_call", "name": "exec", "call_id": "old", "input": #"{ "sandbox_permissions": "require_escalated" }"#]),
+        ], to: rollout)
+        try makeCatalog(at: directory.appending(path: "state_5.sqlite"), rolloutPath: rollout.path)
+        let id = "00000000-0000-0000-0000-000000000001"
+        let controller = RecordingApprovalController(liveStates: [id: .idle])
+        let repository = CodexTaskRepository(codexHome: directory, desktopRuntimeStartDateProvider: { nil })
+        let defaults = try #require(UserDefaults(suiteName: "CodexTaskManagerTests.\(UUID().uuidString)"))
+        let model = TaskManagerModel(repository: repository, defaults: defaults, approvalController: controller)
+        await model.refresh()
+        #expect(model.tasks.first?.state == .idle)
+        #expect(await controller.recordedLiveStateRequestIDs() == [id])
+        model.tasks = model.tasks.map { $0.replacingState(.needsApproval) }
+        try await repository.setTaskUnread(id, unread: true)
+        await model.pause(try #require(model.tasks.first))
+        #expect(model.tasks.isEmpty)
+        #expect(await controller.recordedPauseIDs() == [id])
+        await model.refresh()
+        #expect(model.tasks.isEmpty)
+        #expect(try await repository.readStateOverride(for: id)?.unread == false)
+        let restartedRepository = CodexTaskRepository(codexHome: directory, desktopRuntimeStartDateProvider: { nil })
+        #expect(try await restartedRepository.loadTasks().isEmpty)
+        try appendText(try line(timestamp: "2026-10-20T00:00:00.000Z", type: "event_msg", payload: ["type": "task_started"]) + "\n", to: rollout)
+        await model.refresh()
+        #expect(model.tasks.count == 1)
+        #expect(try await restartedRepository.loadTasks().count == 1)
     }
 
     private func fixtures() -> [CodexTask] {

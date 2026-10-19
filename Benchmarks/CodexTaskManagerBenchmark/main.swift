@@ -6,6 +6,18 @@ import Foundation
 @main
 enum CodexTaskManagerBenchmark {
     static func main() async throws {
+        if CommandLine.arguments.contains("--status") || CommandLine.arguments.contains("--live-status") {
+            let tasks = try await CodexTaskRepository().loadTasks()
+            let controller = CodexTaskApprovalController()
+            for task in tasks where [.running, .needsApproval, .needsResponse].contains(task.state) {
+                if CommandLine.arguments.contains("--live-status") {
+                    let live = await controller.liveAttentionState(for: task.id, isDesktopManaged: task.isDesktopManaged)
+                    print("live=\(live?.rawValue ?? "unknown")", terminator: "\t")
+                }
+                print("\(task.id)\t\(task.state.rawValue)\t\(task.isDesktopManaged)\t\(task.title)")
+            }
+            return
+        }
         if CommandLine.arguments.dropFirst().first == "--cold-only" {
             let workers = max(Int(CommandLine.arguments.dropFirst(2).first ?? "8") ?? 8, 1)
             let repository = CodexTaskRepository(maximumConcurrentScans: workers)

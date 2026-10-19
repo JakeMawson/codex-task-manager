@@ -13,6 +13,7 @@ xcrun stapler validate "$release_app"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$release_app"
 /usr/sbin/spctl --assess --type execute --verbose=2 "$release_app"
 release_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$release_app/Contents/Info.plist")"
+if [[ ! "$release_version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then echo 'Unsupported release version.' >&2; exit 2; fi
 release_archive="$release_output/Codex-Task-Manager-$release_version.zip"
 test ! -e "$release_archive"
 /usr/bin/ditto -c -k --keepParent "$release_app" "$release_archive"

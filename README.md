@@ -1,70 +1,64 @@
 # Codex Task Manager
 
-**Early beta · macOS 15+ · Swift 6.2+**
+A native menu-bar companion for Codex Desktop. macOS 15 or later; Apple silicon and Intel.
 
-Your next task. In plain sight. A native menu-bar companion for Codex Desktop, from Simpl Industries.
-
-[Website](https://stacksimpl.web.app/codex-task-manager/) · [Issues](https://github.com/JakeMawson/codex-task-manager/issues)
-
-This is an early beta. Version 0.1.1 gives Task Manager an independent menu-bar launcher and preserves existing app settings. Its bundled agent runs independently of other apps' menu-bar switches. Task-status behavior is still being refined; use Codex as the source of truth.
+[Releases](https://github.com/JakeMawson/codex-task-manager/releases) · [Issues](https://github.com/JakeMawson/codex-task-manager/issues)
 
 ## Install
 
-The signed Homebrew beta release is being prepared. Once published:
-
 ```sh
 brew install --cask JakeMawson/tap/codex-task-manager
+open "/Applications/Codex Task Manager.app"
 ```
 
-You can build locally now with `Scripts/build-app-bundle release`. Local development builds use an ad-hoc signature. Public release archives use Developer ID signing and Apple notarization; see [RELEASING.md](RELEASING.md).
+Public release archives are universal, Developer ID signed, notarized and stapled. The cask validates the publisher and both app identities before installation.
 
+## Tasks
 
-Codex Task Manager is a private, standalone macOS menu-bar app for triaging local Codex tasks. It is intentionally separate from both Codex and AI Usage Bar and never modifies either application or their source.
+The menu item shows how many chats need you. Open it for running, approval, response, complete/unread and read states. Search, filter, pin tasks and projects, arrange project order, or choose grouped and ungrouped views. Selecting a task opens that exact chat in Codex.
 
-## What it shows
+Desktop activity is checked against the chat’s actual live owner. Historical log entries and delayed tool output cannot keep a finished turn running. A failed live connection preserves the available log state rather than guessing that a chat stopped. CLI/extension logs remain a best-effort fallback.
 
-* Compact two-line task cards with the task title and latest assistant message.
-* Project-folder grouping, optional project labels, and ungrouped views.
-* Running, needs-response, blue complete/unread, and idle states.
-* Status filters plus recent, priority, alphabetical-project, and custom-and-pinned sorting.
-* Per-project four-task disclosure for the grouped All-tasks view, with independent Show more and Show less controls using each folder's exact total.
-* Custom project ordering; Codex-pinned tasks stay first within each project.
-* A task-card context action for task-scoped `Allow all for this task` recovery. Reference implementations for allow-once and similar-command approvals remain disabled because Codex's native buttons own those callbacks most reliably.
+**Stop task** sends Codex’s native user-stop operation to that chat’s owner, including its Goal handling. After acknowledgement, the entry is dismissed across refreshes and app relaunches; a detected new turn brings it back. A rejected action stays visible with an error. Stopping a turn does not terminate independent background processes launched by the chat. Approval decisions stay in Codex’s native approval UI.
 
-Selecting a card opens `codex://threads/<task-id>`, which focuses the exact task in Codex and launches Codex if it is not already running.
+## Settings and updates
 
-## Approval companion
+Open the gear button or right-click the menu item and choose **Settings…**. Settings shows the installed version and build, a manual update check, and **Automatically prepare updates**.
 
-The app is local-only and has no Accessibility requirement. It opens the Codex task catalog database in SQLite read-only mode, reads append-only rollout JSONL for current state and latest assistant text, and reads Codex's persisted local unread task IDs for the blue completion marker.
+Checks run at launch and every two hours. With automatic preparation enabled, the app fetches a newer stable release through its fixed Homebrew cask. It installs a prepared update on the next ordinary launch, or when you choose **Install and relaunch**. It never replaces the app merely because a periodic check found an update. An explicit opt-out is preserved.
 
-Approval actions use Codex's built-in local IPC and App Server interfaces. When Codex Desktop owns a pending callback, Task Manager discovers that exact live owner and routes the settings update, interruption, and one continuation through Codex's follower API. The shared local App Server daemon remains the fallback for tasks it owns. Task Manager does not edit the Codex application, its bundle, its source, raw session history, or global Codex approval defaults.
+GitHub release metadata is an availability signal. It cannot supply executable commands or installation URLs. Homebrew verifies its pinned archive checksum, the cask checks signatures and notarization before replacement, and the app rechecks the installed identities and version before relaunching. Application Support, preferences, Codex chats and unrelated running work are preserved.
 
-No Codex restart is required. `Allow all for this task` clears the selected task's current desktop-owned approval, preserves an active persistent Goal, and resumes it exactly once with `approvalPolicy: never`, `approvalsReviewer: auto_review`, and `dangerFullAccess`. Unrelated tasks keep their own settings and continue to request approval normally.
+Manual update:
 
-## Refresh behavior
-
-The task list uses a recursive macOS file-event stream with file-level events. Rollout appends invalidate only the changed task; SQLite/WAL and unread-state events invalidate only their matching caches. Parsed rollout state is advanced from newly appended bytes, while file size, modification date, and inode signatures protect cache reuse and atomic replacement handling.
-
-Events are batched for 100 milliseconds. A full file-signature reconciliation still runs every 30 seconds, and dropped/coalesced/root-change event flags immediately request the same conservative reconciliation. If the event stream cannot start, the app automatically retains the previous 2.5-second polling behavior.
-
-## Build and install
-
-```bash
-swift test
-swift run -c release CodexTaskManagerBenchmark 20
-Scripts/build-app-bundle release
-Scripts/install-app-bundle
+```sh
+brew update
+brew upgrade --cask JakeMawson/tap/codex-task-manager
 ```
 
-The installer creates `/Applications/Codex Task Manager.app` and registers it with Launch Services.
+## Privacy and compatibility
 
-## Visual QA
+The catalog is opened read-only in SQLite. Rollouts and unread markers are read locally. Task Manager stores its own preferences, read overrides and stopped-turn markers; it does not rewrite Codex session history or its global state. Monitoring does not resume chats, start a companion daemon, enable remote control or replay approval permissions. No Accessibility permission is needed for normal use.
 
-The normal app is menu-bar-only. A suppressed-by-default native QA window is available for repeatable rendered verification. Quit the ordinary app first; deliberately creating a second instance with `open -n` is not supported.
+Only the fixed GitHub update endpoint and Homebrew’s delivery services are used for updates; chat contents are not sent to them. No analytics or cloud backend is included.
 
-```bash
-open "/Applications/Codex Task Manager.app" --args --qa-menu --qa-fixture
-open "/Applications/Codex Task Manager.app" --args --qa-menu --qa-no-response
+Codex Desktop’s local IPC is an internal compatibility surface. The independent launcher also uses a dynamically resolved macOS process-responsibility API. Unsupported changes fail with an error; compatibility with future Codex/macOS releases cannot be guaranteed. The current release is tested on this development Mac; Intel packaging is verified, but Intel execution is not physically tested.
+
+## Development
+
+Swift 6.2 or later:
+
+```sh
+swift test --jobs 2
+Scripts/build-app-bundle debug
 ```
 
-Tests use fictional fixtures. The optional live catalogue smoke test runs only with `CTM_TEST_LOCAL_CATALOG=1`; ordinary tests do not read your local chats.
+The build prints a fresh bundle path. Local builds are ad-hoc signed. See [RELEASING.md](RELEASING.md) for signed distribution and [SECURITY_AUDIT_HACKERONE.md](Support/SECURITY_AUDIT_HACKERONE.md) for the release review.
+
+Quit the normal app before opening a fictional native QA window:
+
+```sh
+open "/path/to/Codex Task Manager.app" --args --qa-menu --qa-fixture
+```
+
+Ordinary tests use disposable fixtures. Optional local-catalogue and live-action tests require explicit environment opt-in; never target a real running chat merely to smoke-test Stop.

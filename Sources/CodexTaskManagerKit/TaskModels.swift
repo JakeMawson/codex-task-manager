@@ -120,6 +120,7 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
     public let latestAssistantMessage: String
     public let recency: Date
     public let isPinned: Bool
+    public let isUnread: Bool
     public let isDesktopManaged: Bool
     public let state: TaskAttentionState
 
@@ -130,6 +131,7 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
         latestAssistantMessage: String,
         recency: Date,
         isPinned: Bool,
+        isUnread: Bool = false,
         isDesktopManaged: Bool = true,
         state: TaskAttentionState
     ) {
@@ -139,6 +141,7 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
         self.latestAssistantMessage = latestAssistantMessage
         self.recency = recency
         self.isPinned = isPinned
+        self.isUnread = isUnread
         self.isDesktopManaged = isDesktopManaged
         self.state = state
     }
@@ -162,6 +165,7 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
             latestAssistantMessage: latestAssistantMessage,
             recency: recency,
             isPinned: isPinned,
+            isUnread: isUnread,
             isDesktopManaged: isDesktopManaged,
             state: state
         )
@@ -175,6 +179,7 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
             latestAssistantMessage: latestAssistantMessage,
             recency: recency,
             isPinned: isPinned,
+            isUnread: isUnread,
             isDesktopManaged: isDesktopManaged,
             state: state
         )
@@ -224,6 +229,7 @@ public struct RolloutSnapshot: Equatable, Sendable {
     public let latestAssistantMessage: String?
     public let latestAssistantMessageDate: Date?
     public let latestUserMessageDate: Date?
+    public let latestTurnStartDate: Date?
     public let attentionRequestDate: Date?
     public let completionDate: Date?
     public let latestRecordDate: Date?
@@ -236,6 +242,7 @@ public struct RolloutSnapshot: Equatable, Sendable {
         latestAssistantMessage: String?,
         latestAssistantMessageDate: Date? = nil,
         latestUserMessageDate: Date? = nil,
+        latestTurnStartDate: Date? = nil,
         attentionRequestDate: Date? = nil,
         completionDate: Date? = nil,
         latestRecordDate: Date? = nil,
@@ -247,6 +254,7 @@ public struct RolloutSnapshot: Equatable, Sendable {
         self.latestAssistantMessage = latestAssistantMessage
         self.latestAssistantMessageDate = latestAssistantMessageDate
         self.latestUserMessageDate = latestUserMessageDate
+        self.latestTurnStartDate = latestTurnStartDate
         self.attentionRequestDate = attentionRequestDate
         self.completionDate = completionDate
         self.latestRecordDate = latestRecordDate
