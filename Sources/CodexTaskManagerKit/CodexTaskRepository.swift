@@ -20,6 +20,12 @@ public enum CodexTaskRepositoryError: LocalizedError, Sendable {
 }
 
 public actor CodexTaskRepository {
+    private struct SimulatedRead: Codable, Equatable {
+        let marker: Date
+        let turnStart: Date
+        var unreadSignature: FileSignature?
+    }
+
     private static let maximumIncrementalAppendBytes: UInt64 = 4 * 1_024 * 1_024
 
     private struct ReadStateOverride: Codable, Sendable {
@@ -34,7 +40,7 @@ public actor CodexTaskRepository {
         var tasks: [String: ReadStateOverride]
     }
 
-    private struct FileSignature: Equatable, Sendable {
+    private struct FileSignature: Codable, Equatable, Sendable {
         let size: UInt64
         let modificationDate: Date
         let systemFileNumber: UInt64?
@@ -96,6 +102,9 @@ public actor CodexTaskRepository {
     private var cachedTitleIndexSignature: FileSignature?
     private var unreadCache: Set<String>?
     private var cachedUnreadSignature: FileSignature?
+    private var cachedAuthSignature: FileSignature?
+    private var nativeReadContext: CodexReadContext?
+    private var didLoadSimulatedReads = false
     private var latestTurnStartDates: [String: Date] = [:]
     private var latestReadStateMarkers: [String: Date] = [:]
     private var latestMetrics = CodexTaskLoadMetrics()
@@ -136,7 +145,7 @@ public actor CodexTaskRepository {
         self.desktopRuntimeStartDateProvider = desktopRuntimeStartDateProvider
     }
 
-    public func loadTasks(refresh hint: TaskRefreshHint = .reconciliation) async throws -> [CodexTask] {
+    public func loadTasks(refresh hint: TaskRefreshHint = .reconciliation, simulatedRead: Bool = false) async throws -> [CodexTask] {
         let catalogResult = try loadCatalog(refresh: hint)
         let titleIndexResult = loadTitleIndex(refresh: hint)
         let unreadResult = try loadUnreadTaskIDs(refresh: hint)
@@ -144,6 +153,16 @@ public actor CodexTaskRepository {
         let snapshotResult = await rolloutSnapshots(for: catalogResult.rows, refresh: hint)
         let desktopRuntimeStartDate = cachedDesktopRuntimeStartDate()
         let stopped = try loadStoppedTurns()
+        var simulated = try loadSimulatedReads()
+        let previousSimulated = simulated
+        let scope = readScope
+        // Codex exposes a set, not an unread event log. If it changed while we
+        // were closed, we cannot prove that a dismissal still belongs to the
+        // same unread episode. Prefer resurfacing to hiding a later event.
+        if !didLoadSimulatedReads {
+            simulated = simulated.filter { !$0.key.hasPrefix(scope + ":") || $0.value.unreadSignature == cachedUnreadSignature }
+            didLoadSimulatedReads = true
+        }
         var turnStarts: [String: Date] = [:]
         var readStateMarkers: [String: Date] = [:]
         let tasks: [CodexTask] = catalogResult.rows.compactMap { row -> CodexTask? in
@@ -151,25 +170,37 @@ public actor CodexTaskRepository {
                 ?? RolloutSnapshot(latestAssistantMessage: nil, isRunning: false, needsApproval: false, needsResponse: false)
             let turnStart = rollout.latestTurnStartDate ?? .distantPast
             turnStarts[row.id] = turnStart
-            if let stoppedTurn = stopped[row.id], turnStart <= stoppedTurn { return nil }
             let catalogRecency = Date(timeIntervalSince1970: Double(row.recencyMilliseconds) / 1_000)
             let readStateMarker = rollout.readStateMarker(fallback: catalogRecency)
             readStateMarkers[row.id] = readStateMarker
             let readStateOverride = readStateOverrides[row.id].flatMap {
                 $0.marker >= readStateMarker ? $0 : nil
             }
-            let isUnread = readStateOverride?.unread ?? unreadResult.ids.contains(row.id)
+            // Codex owns modern read state; legacy local overrides must never
+            // hide a native unread flag, including a new completion.
+            let nativeUnread = nativeReadContext != nil
+                ? unreadResult.ids.contains(row.id)
+                : readStateOverride?.unread ?? unreadResult.ids.contains(row.id)
+            let key = scope + ":" + row.id
             let isDesktopManaged = row.isDesktopManaged || rollout.isDesktopManaged
+            let isRunning = rollout.isRunning && !Self.isStaleDesktopRunningState(
+                rowIsDesktopManaged: isDesktopManaged,
+                rolloutLatestRecordDate: rollout.latestRecordDate,
+                desktopRuntimeStartDate: desktopRuntimeStartDate
+            )
+            let hasActivity = isRunning || rollout.needsApproval || rollout.needsResponse
+            if let hidden = simulated[key], !unreadResult.ids.contains(row.id)
+                || hasActivity || turnStart > hidden.turnStart || readStateMarker > hidden.marker {
+                simulated.removeValue(forKey: key)
+            }
+            let isUnread = nativeUnread && !(simulatedRead && simulated[key] != nil)
+            if let stoppedTurn = stopped[row.id], turnStart <= stoppedTurn { return nil }
             let state: TaskAttentionState
             if rollout.needsApproval {
                 state = .needsApproval
             } else if rollout.needsResponse {
                 state = .needsResponse
-            } else if rollout.isRunning && !Self.isStaleDesktopRunningState(
-                rowIsDesktopManaged: isDesktopManaged,
-                rolloutLatestRecordDate: rollout.latestRecordDate,
-                desktopRuntimeStartDate: desktopRuntimeStartDate
-            ) {
+            } else if isRunning {
                 state = .running
             } else if isUnread {
                 state = .complete
@@ -189,8 +220,12 @@ public actor CodexTaskRepository {
                 state: state
             )
         }
+        for key in Array(simulated.keys) where key.hasPrefix(scope + ":") {
+            simulated[key]?.unreadSignature = cachedUnreadSignature
+        }
         latestReadStateMarkers = readStateMarkers
         latestTurnStartDates = turnStarts
+        if simulated != previousSimulated { try saveSimulatedReads(simulated) }
         latestMetrics = CodexTaskLoadMetrics(
             taskCount: tasks.count,
             catalogReloaded: catalogResult.reloaded,
@@ -207,6 +242,43 @@ public actor CodexTaskRepository {
 
     public func loadUnreadTaskIDs() throws -> Set<String> {
         try readUnreadTaskIDs()
+    }
+
+    public func usesNativeReadState() -> Bool { nativeReadContext != nil }
+
+    func nativeUnreadState() throws -> CodexUnreadState { try CodexUnreadState.read(codexHome: codexHome) }
+
+    private var readScope: String {
+        nativeReadContext.map { $0.identityKey + ":" + $0.executionHostKey } ?? "legacy-local"
+    }
+    private var simulatedReadsURL: URL {
+        readStateOverrideURL.deletingLastPathComponent().appending(path: "simulated-read-state.json")
+    }
+    private func loadSimulatedReads() throws -> [String: SimulatedRead] {
+        guard FileManager.default.fileExists(atPath: simulatedReadsURL.path) else { return [:] }
+        return try JSONDecoder().decode([String: SimulatedRead].self, from: Data(contentsOf: simulatedReadsURL))
+    }
+    private func saveSimulatedReads(_ reads: [String: SimulatedRead]) throws {
+        try FileManager.default.createDirectory(at: simulatedReadsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(reads).write(to: simulatedReadsURL, options: .atomic)
+    }
+    public func simulateRead(_ id: String, observedMarker: Date) throws {
+        let state = try nativeUnreadState()
+        guard state.context == nativeReadContext else {
+            throw CodexTaskRepositoryError.query("Codex's account changed. Refresh before marking this chat read.")
+        }
+        guard state.ids.contains(id) else {
+            // Preserve compatibility with legacy Task Manager-created flags.
+            if state.context == nil { try setTaskUnread(id, unread: false, observedMarker: observedMarker) }
+            return
+        }
+        var reads = try loadSimulatedReads()
+        reads[readScope + ":" + id] = SimulatedRead(
+            marker: min(latestReadStateMarkers[id] ?? observedMarker, observedMarker),
+            turnStart: latestTurnStartDates[id] ?? .distantPast,
+            unreadSignature: cachedUnreadSignature
+        )
+        try saveSimulatedReads(reads)
     }
 
     private var stoppedTurnsURL: URL {
@@ -294,15 +366,20 @@ public actor CodexTaskRepository {
     private func loadUnreadTaskIDs(refresh hint: TaskRefreshHint) throws -> (ids: Set<String>, reloaded: Bool) {
         let url = codexHome.appending(path: ".codex-global-state.json")
         let signature = Self.fileSignature(path: url.path)
+        let authSignature = Self.fileSignature(path: codexHome.appending(path: "auth.json").path)
         let signatureChanged = signature != cachedUnreadSignature
         let shouldReload = unreadCache == nil
             || hint.unreadStateChanged
-            || (hint.requiresFullReconciliation && signatureChanged)
+            || signatureChanged || authSignature != cachedAuthSignature
         if shouldReload {
-            let ids = try readUnreadTaskIDs()
-            unreadCache = ids
-            cachedUnreadSignature = Self.fileSignature(path: url.path)
-            return (ids, true)
+            let state = try CodexUnreadState.read(codexHome: codexHome)
+            unreadCache = state.ids
+            nativeReadContext = state.context
+            // Retain the pre-read signatures so a concurrent atomic rewrite
+            // cannot be cached as though its newer bytes were already read.
+            cachedUnreadSignature = signature
+            cachedAuthSignature = authSignature
+            return (state.ids, true)
         }
         return (unreadCache ?? [], false)
     }
@@ -358,15 +435,7 @@ public actor CodexTaskRepository {
     }
 
     private func readUnreadTaskIDs() throws -> Set<String> {
-        let url = codexHome.appending(path: ".codex-global-state.json")
-        guard let data = try? Data(contentsOf: url) else { return [] }
-        guard
-            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let persisted = root["electron-persisted-atom-state"] as? [String: Any],
-            let byHost = persisted["unread-thread-ids-by-host-v1"] as? [String: Any],
-            let local = byHost["local"] as? [String]
-        else { return [] }
-        return Set(local)
+        try CodexUnreadState.read(codexHome: codexHome).ids
     }
 
     private func readCatalog() throws -> [CatalogRow] {
@@ -395,7 +464,7 @@ public actor CodexTaskRepository {
             is_pinned,
             COALESCE(thread_source, '')
         FROM threads
-        WHERE archived = 0 AND preview <> ''
+        WHERE archived = 0
         ORDER BY recency_at_ms DESC, id DESC;
         """
 

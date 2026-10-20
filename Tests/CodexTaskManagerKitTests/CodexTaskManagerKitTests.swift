@@ -1499,6 +1499,76 @@ struct CodexTaskManagerKitTests {
         #expect(request.params.objectValue?["mode"]?.stringValue == "user-stop")
     }
 
+    @Test("Modern Codex unread state survives old overrides and empty previews")
+    func modernUnreadSynchronization() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let id = "00000000-0000-0000-0000-000000000001"
+        let rollout = directory.appending(path: "rollout.jsonl")
+        try write([line(timestamp: "2026-08-13T12:00:00Z", type: "event_msg", payload: ["type": "task_complete"])], to: rollout)
+        let dbURL = directory.appending(path: "state_5.sqlite")
+        try makeCatalog(at: dbURL, rolloutPath: rollout.path)
+        var db: OpaquePointer?
+        #expect(sqlite3_open(dbURL.path, &db) == SQLITE_OK)
+        defer { sqlite3_close(db) }
+        #expect(sqlite3_exec(db, "UPDATE threads SET preview = ''", nil, nil, nil) == SQLITE_OK)
+        // Non-secret synthetic token: the reader needs only identity claims.
+        let claims = try JSONSerialization.data(withJSONObject: ["https://api.openai.com/auth": ["chatgpt_account_id": "fixture-account", "chatgpt_user_id": "fixture-user"]])
+        let token = "header." + claims.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "") + ".signature"
+        try JSONSerialization.data(withJSONObject: ["auth_mode": "chatgpt", "tokens": ["access_token": token]]).write(to: directory.appending(path: "auth.json"))
+        let identity = "398a4b8d10cae928cc6aeda60cc6cb771e582bc6839e6da13ab6667a83938854"
+        let host = "local:092af2cb59bdd804c6f7f1cd1d85464b682974e43cd517397d25510024034d1c"
+        let stateURL = directory.appending(path: ".codex-global-state.json")
+        func save(_ ids: [String]) throws {
+            try JSONSerialization.data(withJSONObject: ["electron-thread-read-state-v1": ["version": 1, "unreadByIdentity": [identity: [host: ids], "other-account": [host: ["other"]]]]]).write(to: stateURL, options: .atomic)
+        }
+        try save([id])
+        let repository = CodexTaskRepository(codexHome: directory, desktopRuntimeStartDateProvider: { nil })
+        try await repository.setTaskUnread(id, unread: false)
+        #expect(try await repository.loadUnreadTaskIDs() == [id])
+        var tasks = try await repository.loadTasks()
+        #expect(tasks.count == 1)
+        #expect(tasks.first?.state == .complete)
+        try save([])
+        tasks = try await repository.loadTasks(refresh: TaskRefreshHint(unreadStateChanged: true))
+        #expect(tasks.first?.isUnread == false)
+        // Native re-marking unread must work without any new rollout timestamp.
+        try save([id])
+        tasks = try await repository.loadTasks(refresh: .reconciliation)
+        #expect(tasks.first?.isUnread == true)
+        let reopened = CodexTaskRepository(codexHome: directory)
+        #expect(try await reopened.loadTasks().first?.state == .complete)
+
+        let originalState = try Data(contentsOf: stateURL)
+        try await repository.simulateRead(id, observedMarker: tasks[0].recency)
+        #expect(try Data(contentsOf: stateURL) == originalState)
+        #expect(try await repository.loadTasks(simulatedRead: true).first?.isUnread == false)
+        #expect(try await CodexTaskRepository(codexHome: directory).loadTasks(simulatedRead: true).first?.state == .idle)
+        // A read/unread cycle entirely while Task Manager was closed leaves the
+        // same set, but changes the native store signature. Resurface safely.
+        try save([])
+        try save([id])
+        #expect(try await CodexTaskRepository(codexHome: directory).loadTasks(simulatedRead: true).first?.isUnread == true)
+        try await repository.simulateRead(id, observedMarker: tasks[0].recency)
+        // Automated mode exposes native state without destroying the simulation.
+        #expect(try await repository.loadTasks(simulatedRead: false).first?.isUnread == true)
+        try save([])
+        _ = try await repository.loadTasks(simulatedRead: true)
+        try save([id])
+        #expect(try await repository.loadTasks(simulatedRead: true).first?.isUnread == true)
+        tasks = try await repository.loadTasks()
+        try await repository.simulateRead(id, observedMarker: tasks[0].recency)
+        try append([line(timestamp: "2026-08-13T12:01:00Z", type: "event_msg", payload: ["type": "task_started"])], to: rollout)
+        #expect(try await repository.loadTasks(simulatedRead: true).first?.state == .running)
+        try append([line(timestamp: "2026-08-13T12:01:02Z", type: "event_msg", payload: ["type": "task_complete"])], to: rollout)
+        #expect(try await repository.loadTasks(simulatedRead: true).first?.state == .complete)
+        tasks = try await repository.loadTasks()
+        try await repository.simulateRead(id, observedMarker: tasks[0].recency)
+        try append([line(timestamp: "2026-08-13T12:02:00Z", type: "event_msg", payload: ["type": "task_complete"])], to: rollout)
+        #expect(try await repository.loadTasks(simulatedRead: true).first?.state == .complete)
+    }
+
     @Test("Task Manager read overrides persist without mutating Codex global state")
     func unreadStateMutation() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)

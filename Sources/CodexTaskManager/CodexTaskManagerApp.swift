@@ -362,7 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showSettings(_ sender: Any?) {
         statusPopover.close()
         if let settingsWindow { settingsWindow.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
-        let controller = NSHostingController(rootView: AppUpdateSettings(onClose: { [weak self] in self?.settingsWindow?.close() }))
+        let controller = NSHostingController(rootView: AppUpdateSettings(model: Self.taskManagerModel, onClose: { [weak self] in self?.settingsWindow?.close() }))
         let window = NSWindow(contentViewController: controller)
         window.title = "Codex Task Manager Settings"
         window.styleMask = [.titled, .closable]

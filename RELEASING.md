@@ -1,6 +1,6 @@
 # Releases
 
-Current version: **0.2.0, build 5**. Release archives contain only the signed application and its nested menu agent. Source, logs, signing credentials and local chat data do not belong in an archive.
+Release version: **0.2.1, build 6**. This release synchronizes local unread state with Codex and adds configurable simulated/automated read actions with optional guarded Back navigation. Release archives contain only the signed application and its nested menu agent. Source, logs, signing credentials and local chat data do not belong in an archive.
 
 The launcher and agent retain their existing identities:
 
@@ -22,19 +22,19 @@ The independent launch bridge dynamically resolves a private macOS responsibilit
 Use an absolute **fresh** output under `build/releases/`; packaging never empties an existing destination.
 
 ```sh
-Scripts/package-release /absolute/checkout/build/releases/0.2.0-unique 'Developer ID Application: Publisher (TEAMID)'
-Scripts/finalize-release /absolute/checkout/build/releases/0.2.0-unique
+Scripts/package-release /absolute/checkout/build/releases/0.2.1-unique 'Developer ID Application: Publisher (TEAMID)'
+Scripts/finalize-release /absolute/checkout/build/releases/0.2.1-unique
 ```
 
 Both architectures are built with two Swift workers. Signing requires the publisher’s Developer ID certificate. Notarization uses this app’s existing dedicated **Codex Task Manager Notary** Keychain profile. Credentials stay in Keychain; never borrow another app’s profile or put passwords in source/arguments. New credential setup requires its separate owner handoff.
 
-Finalize submits the exact signed archive, waits for acceptance, staples and validates the app, verifies strict signatures and Gatekeeper, then creates `Codex-Task-Manager-0.2.0.zip` and prints its SHA-256.
+Finalize submits the exact signed archive, waits for acceptance, staples and validates the app, verifies strict signatures and Gatekeeper, then creates `Codex-Task-Manager-0.2.1.zip` and prints its SHA-256.
 
 ## Publish and install
 
 Public source pushes, tags, GitHub release/asset writes and tap changes require the owner’s current exact publication instruction. Preserve the pre-push guard. Never force-push or silently replace existing release bytes.
 
-1. Push the reviewed source commit and matching `v0.2.0` tag.
+1. Push the reviewed source commit and matching `v0.2.1` tag.
 2. Publish a stable GitHub release with only the finalized ZIP and its SHA-256 text.
 3. Update the existing `JakeMawson/tap/codex-task-manager` cask to that version and digest. Preserve its publisher, bundle-ID and notarization preflight checks; these run before app installation. Use `xcrun stapler validate` for the ticket; `spctl` assessment cannot access its Mach service inside Homebrew’s cask sandbox. The updater assesses Gatekeeper outside that sandbox before relaunch.
 4. Fetch through Homebrew, compare the exact public digest, then upgrade the installed app. Preserve preferences and Application Support. Recheck both installed identities, universal architectures, strict signatures, stapling, Gatekeeper and version. Also run `/usr/bin/gktool scan` against the installed bundle; unlike static assessment, this exercises the execution scan used by ordinary launch.

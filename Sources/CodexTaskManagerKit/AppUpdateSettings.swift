@@ -2,9 +2,13 @@ import SwiftUI
 
 public struct AppUpdateSettings: View {
     @Bindable private var updates: AppUpdateModel
+    @Bindable private var model: TaskManagerModel
+    @State private var accessibilityAvailable = NativeTaskReadNavigation.accessibilityAvailable
     private let onClose: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
-    public init(updates: AppUpdateModel = .shared, onClose: (() -> Void)? = nil) { self.updates = updates; self.onClose = onClose }
+    public init(updates: AppUpdateModel = .shared, model: TaskManagerModel, onClose: (() -> Void)? = nil) {
+        self.updates = updates; self.model = model; self.onClose = onClose
+    }
     public var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
@@ -15,6 +19,8 @@ public struct AppUpdateSettings: View {
                 Spacer()
                 Button("Done") { if let onClose { onClose() } else { dismiss() } }.keyboardShortcut(.cancelAction)
             }
+            Divider()
+            readBehavior
             Divider()
             LabeledContent("Version", value: "\(updates.currentVersion) (\(updates.build))")
             Toggle("Automatically prepare updates", isOn: $updates.automaticallyPrepare)
@@ -57,6 +63,37 @@ public struct AppUpdateSettings: View {
         }
         .padding(24).frame(width: 500)
         .preferredColorScheme(.dark)
+        .onChange(of: model.readSettings.mode) { Task { await model.readBehaviorDidChange() } }
+        .onChange(of: model.readSettings.returnToPriorChat) { Task { await model.readBehaviorDidChange() } }
+        .onChange(of: model.readSettings.returnDelay) { Task { await model.readBehaviorDidChange() } }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            accessibilityAvailable = NativeTaskReadNavigation.accessibilityAvailable
+        }
+    }
+    private var readBehavior: some View {
+        @Bindable var reads = model.readSettings
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Mark as read").font(.headline)
+            Picker("Mode", selection: $reads.mode) {
+                Text("Simulated").tag(TaskReadMode.simulated)
+                Text("Automated").tag(TaskReadMode.automated)
+            }.pickerStyle(.segmented)
+            Text(reads.mode == .simulated
+                 ? "Marks the current unread episode read in Task Manager only. New activity or a later read/unread cycle brings the chat back. Codex’s own unread flag stays unchanged."
+                 : "Opens the chat in Codex and waits up to 8 seconds for Codex to confirm it is read.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if reads.mode == .automated {
+                Toggle("Return to prior chat", isOn: $reads.returnToPriorChat)
+                if reads.returnToPriorChat {
+                    Stepper("Return after \(Int(reads.returnDelay)) \(reads.returnDelay == 1 ? "second" : "seconds")", value: $reads.returnDelay, in: 1...10, step: 1)
+                    Text("After read confirmation, uses Codex’s Back command. Cancels if you interact, switch apps or change this setting.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if !accessibilityAvailable {
+                        Button("Enable Accessibility for automatic return…") { NativeTaskReadNavigation.requestAccessibility() }
+                    }
+                }
+            }
+        }
     }
     private var status: String {
         switch updates.phase {

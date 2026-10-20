@@ -113,6 +113,10 @@ public final class TaskManagerModel {
     private let repository: CodexTaskRepository?
     private let approvalController: (any TaskApprovalControlling)?
     private let defaults: UserDefaults
+    public let readSettings: ReadBehaviorSettings
+    private let readNavigation: any TaskReadNavigating
+    private var readOperationID: UUID?
+    public private(set) var readActionInFlightID: String?
     private let fixtureName: String?
     private var isRefreshing = false
     private var pendingRefreshHint = TaskRefreshHint.none
@@ -174,7 +178,8 @@ public final class TaskManagerModel {
         repository: CodexTaskRepository = CodexTaskRepository(),
         defaults: UserDefaults = .standard,
         fixtureName: String? = nil,
-        approvalController: (any TaskApprovalControlling)? = CodexTaskApprovalController()
+        approvalController: (any TaskApprovalControlling)? = CodexTaskApprovalController(),
+        readNavigation: (any TaskReadNavigating)? = nil
     ) {
         let argumentFixtureName: String?
         if CommandLine.arguments.contains("--qa-no-response") {
@@ -194,6 +199,8 @@ public final class TaskManagerModel {
             ? (UserDefaults(suiteName: "com.jakemawson.codex-task-manager.qa-fixture") ?? defaults)
             : defaults
         self.defaults = resolvedDefaults
+        self.readSettings = ReadBehaviorSettings(defaults: resolvedDefaults)
+        self.readNavigation = readNavigation ?? NativeTaskReadNavigation()
         self.fixtureName = resolvedFixtureName
         let preferences = Self.loadPreferences(defaults: resolvedDefaults)
         self.selectedStatusFilters = preferences.selectedStatusFilters
@@ -393,7 +400,8 @@ public final class TaskManagerModel {
             let nextHint = pendingRefreshHint
             pendingRefreshHint = .none
             do {
-                let scannedTasks = try await repository.loadTasks(refresh: nextHint)
+                let scannedTasks = try await repository.loadTasks(refresh: nextHint, simulatedRead: readSettings.mode == .simulated)
+                nativeReadStateEnabled = await repository.usesNativeReadState()
                 let reconciledTasks = await reconcileLiveApprovalStates(in: scannedTasks)
                 sourcePinStates = Dictionary(uniqueKeysWithValues: reconciledTasks.map { ($0.id, $0.isPinned) })
                 let refreshedTasks = applyPinOverrides(to: reconciledTasks)
@@ -462,6 +470,8 @@ public final class TaskManagerModel {
     }
 
     public func open(_ task: CodexTask) {
+        readOperationID = nil
+        readActionInFlightID = nil
         guard let url = CodexDeepLink.url(for: task.id) else {
             errorMessage = "This task has an invalid Codex identifier."
             return
@@ -488,16 +498,46 @@ public final class TaskManagerModel {
         }
     }
 
+    public private(set) var nativeReadStateEnabled = false
+
+    public func readBehaviorDidChange() async {
+        readOperationID = nil
+        readActionInFlightID = nil
+        await refresh(silent: true)
+    }
+
     public func markAsRead(_ task: CodexTask) async {
         guard task.state == .complete, let repository else { return }
 
+        let operation = UUID()
+        readOperationID = operation
+        readActionInFlightID = task.id
+        defer { if readOperationID == operation { readActionInFlightID = nil; readOperationID = nil } }
         do {
-            try await markTaskAsRead(task, repository: repository)
+            if readSettings.mode == .automated {
+                let returning = readSettings.returnToPriorChat
+                let delay = readSettings.returnDelay
+                let result = try await AutomatedReadOperation.run(
+                    id: task.id, navigation: readNavigation, returnAfterRead: returning, delay: delay,
+                    readState: { try await repository.nativeUnreadState() },
+                    isCurrent: { self.readOperationID == operation && self.readSettings.mode == .automated },
+                    canReturn: { self.readSettings.returnToPriorChat && self.readSettings.returnDelay == delay }
+                )
+                guard readOperationID == operation else { throw CancellationError() }
+                approvalMessage = result == .returnCancelled ? "READ IN CODEX — automatic return cancelled" : "READ IN CODEX — \(task.title)"
+            } else {
+                try await markTaskAsRead(task, repository: repository)
+                approvalMessage = "READ IN TASK MANAGER — \(task.title)"
+            }
+            await refresh(silent: true)
             errorMessage = nil
-            approvalMessage = "MARKED AS READ — \(task.title)"
+        } catch is CancellationError {
+            // A newer action or changed mode owns navigation now.
         } catch {
-            approvalMessage = nil
-            errorMessage = error.localizedDescription
+            if readOperationID == operation {
+                approvalMessage = nil
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -538,6 +578,10 @@ public final class TaskManagerModel {
 
     public func markAllAsRead(in projectPath: String) async {
         guard let repository else { return }
+        guard readSettings.mode == .simulated else {
+            errorMessage = "Use an individual chat's read action in automated mode."
+            return
+        }
         let candidates = eligibleTasks(in: projectPath, state: .complete)
         guard !candidates.isEmpty else { return }
 
@@ -593,9 +637,9 @@ public final class TaskManagerModel {
         approvalActionsInFlight.insert(task.id)
         defer { approvalActionsInFlight.remove(task.id) }
 
-        try await repository.setTaskUnread(task.id, unread: false, observedMarker: task.recency)
+        try await repository.simulateRead(task.id, observedMarker: task.recency)
         if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-            tasks[index] = tasks[index].replacingState(.idle)
+            tasks[index] = tasks[index].markingRead()
         }
     }
 

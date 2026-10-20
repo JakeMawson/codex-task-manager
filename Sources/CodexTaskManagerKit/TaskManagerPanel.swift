@@ -22,7 +22,7 @@ public struct TaskManagerPanel: View {
         .task {
             model.startBackgroundRefresh()
         }
-        .sheet(isPresented: $showsSettings) { AppUpdateSettings() }
+        .sheet(isPresented: $showsSettings) { AppUpdateSettings(model: model) }
         .sheet(isPresented: $showsProjectArrangement) {
             ProjectOrderView(model: model)
         }
@@ -453,7 +453,8 @@ public struct TaskManagerPanel: View {
             } label: {
                 Label("Mark all as read", systemImage: "envelope.open")
             }
-            .disabled(model.projectUnreadCount(path) == 0)
+            .disabled(model.readSettings.mode == .automated || model.projectUnreadCount(path) == 0)
+            .help(model.readSettings.mode == .automated ? "Use individual chats in automated mode." : "Mark this unread episode read in Task Manager only")
 
             Button {
                 Task { await model.pauseAllTasks(in: path) }
@@ -594,8 +595,9 @@ public struct TaskManagerPanel: View {
             Button {
                 Task { await model.markAsRead(task) }
             } label: {
-                Label("Mark as read", systemImage: "envelope.open")
+                Label(model.readSettings.mode == .automated ? "Open and mark as read in Codex" : "Mark as read in Task Manager", systemImage: "envelope.open")
             }
+            .disabled(model.readActionInFlightID == task.id)
         case .needsResponse:
             Button("Stop task", systemImage: "stop.circle") { Task { await model.pause(task) } }
         case .idle:

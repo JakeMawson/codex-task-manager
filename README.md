@@ -17,6 +17,15 @@ Public release archives are universal, Developer ID signed, notarized and staple
 
 The menu item shows how many chats need you. Open it for running, approval, response, complete/unread and read states. Search, filter, pin tasks and projects, arrange project order, or choose grouped and ungrouped views. Selecting a task opens that exact chat in Codex.
 
+Unread status follows Codex Desktop’s current account and local execution host, including chats whose catalogue preview is empty. Reading a chat in Codex clears it here; marking it unread or finishing another turn can bring it back. Old Task Manager overrides cannot mask native unread flags. Monitoring covers local chats only.
+
+Settings offers two **Mark as read** modes:
+
+- **Simulated** (default) marks the current unread episode read in Task Manager only, without opening Codex. A detected native read/unread cycle, running/approval/response state, new turn or new completion clears that simulation. If Codex’s state file changed while Task Manager was closed, uncertain dismissals resurface conservatively. Project-wide marking is available in this mode.
+- **Automated** opens the exact chat in Codex and waits up to eight seconds for its native unread flag to clear. A timeout leaves it unread. Optional **Return to prior chat** waits another 1–10 seconds after confirmation, then invokes Codex’s own Back menu command. It requires Accessibility permission and cancels on input, app/window changes, a newer read action, account changes or changed settings. Automated marking is individual, so a batch cannot race navigation.
+
+Automatic return never reads keystrokes, clipboard or chat text: its input guard uses event counts. It uses the English Back/Go Back menu command; unsupported or disabled navigation fails with an explanation. Without an existing Codex window there is no prior chat to return to. It follows Codex’s navigation history rather than recording a private current-chat identifier.
+
 Desktop activity is checked against the chat’s actual live owner. Historical log entries and delayed tool output cannot keep a finished turn running. A failed live connection preserves the available log state rather than guessing that a chat stopped. CLI/extension logs remain a best-effort fallback.
 
 **Stop task** sends Codex’s native user-stop operation to that chat’s owner, including its Goal handling. After acknowledgement, the entry is dismissed across refreshes and app relaunches; a detected new turn brings it back. A rejected action stays visible with an error. Stopping a turn does not terminate independent background processes launched by the chat. Approval decisions stay in Codex’s native approval UI.
@@ -38,7 +47,7 @@ brew upgrade --cask JakeMawson/tap/codex-task-manager
 
 ## Privacy and compatibility
 
-The catalog is opened read-only in SQLite. Rollouts and unread markers are read locally. Task Manager stores its own preferences, read overrides and stopped-turn markers; it does not rewrite Codex session history or its global state. Monitoring does not resume chats, start a companion daemon, enable remote control or replay approval permissions. No Accessibility permission is needed for normal use.
+The catalog is opened read-only in SQLite. Rollouts and unread markers are read locally. Task Manager stores its own preferences, stopped-turn markers and legacy read overrides; modern unread status remains owned by Codex. It does not rewrite Codex session history or its global state. Monitoring does not resume chats, start a companion daemon, enable remote control or replay approval permissions. Monitoring, simulated reads and automated opening do not require Accessibility permission. Only optional automatic return requires it.
 
 Only the fixed GitHub update endpoint and Homebrew’s delivery services are used for updates; chat contents are not sent to them. No analytics or cloud backend is included.
 

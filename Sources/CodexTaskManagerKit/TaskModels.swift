@@ -171,6 +171,15 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
         )
     }
 
+    public func markingRead() -> CodexTask {
+        CodexTask(
+            id: id, title: title, projectPath: projectPath,
+            latestAssistantMessage: latestAssistantMessage, recency: recency,
+            isPinned: isPinned, isUnread: false, isDesktopManaged: isDesktopManaged,
+            state: state == .complete ? .idle : state
+        )
+    }
+
     public func replacingPinned(_ isPinned: Bool) -> CodexTask {
         CodexTask(
             id: id,

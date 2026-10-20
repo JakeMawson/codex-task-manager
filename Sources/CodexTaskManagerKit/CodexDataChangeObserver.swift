@@ -64,7 +64,7 @@ enum CodexDataChangeClassifier {
         }
 
         let lastComponent = URL(fileURLWithPath: path).lastPathComponent
-        if lastComponent == ".codex-global-state.json" {
+        if lastComponent == ".codex-global-state.json" || lastComponent == "auth.json" {
             hint.unreadStateChanged = true
             return
         }
