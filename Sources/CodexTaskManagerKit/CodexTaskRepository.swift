@@ -582,7 +582,6 @@ public actor CodexTaskRepository {
         for rows: [CatalogRow],
         refresh hint: TaskRefreshHint
     ) async -> SnapshotLoadResult {
-        let fallback = RolloutSnapshot(latestAssistantMessage: nil, isRunning: false, needsApproval: false, needsResponse: false)
         var snapshots: [String: RolloutSnapshot] = [:]
         var requests: [ScanRequest] = []
         var metadataChecks = 0
@@ -603,7 +602,6 @@ public actor CodexTaskRepository {
 
             metadataChecks += 1
             guard let baseRequest = Self.scanRequest(path: row.rolloutPath) else {
-                snapshots[row.rolloutPath] = fallback
                 rolloutCache.removeValue(forKey: row.rolloutPath)
                 continue
             }

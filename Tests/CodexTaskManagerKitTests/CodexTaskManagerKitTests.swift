@@ -1931,6 +1931,38 @@ struct CodexTaskManagerKitTests {
         #expect(model.presentation.sections.flatMap(\.tasks).count == 1)
     }
 
+    @Test("Missing history placeholders do not trigger native discovery; arriving and removed files are reconciled")
+    @MainActor
+    func missingLocalHistoryDiscovery() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let rollout = directory.appending(path: "rollout.jsonl")
+        try makeCatalog(at: directory.appending(path: "state_5.sqlite"), rolloutPath: rollout.path)
+        let id = "00000000-0000-0000-0000-000000000001"
+        let controller = RecordingApprovalController(liveStates: [id: .needsResponse])
+        let repository = CodexTaskRepository(codexHome: directory, desktopRuntimeStartDateProvider: { nil })
+        let suite = "CodexTaskManagerTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = TaskManagerModel(repository: repository, defaults: defaults, approvalController: controller)
+        await model.refresh()
+        #expect(model.tasks.first?.hasLocalActivity == false)
+        #expect(await controller.recordedLiveStateRequestIDs().isEmpty)
+        try write([
+            line(type: "session_meta", payload: ["originator": "Codex Desktop"]),
+            line(type: "event_msg", payload: ["type": "task_complete"]),
+        ], to: rollout)
+        await model.refresh()
+        #expect(model.tasks.first?.hasLocalActivity == true)
+        #expect(model.tasks.first?.state == .needsResponse)
+        #expect(await controller.recordedLiveStateRequestIDs() == [id])
+        try FileManager.default.removeItem(at: rollout)
+        await model.refresh()
+        #expect(model.tasks.first?.hasLocalActivity == false)
+        #expect(await controller.recordedLiveStateRequestIDs() == [id])
+    }
+
     @Test("Desktop stale approval reconciles despite a private server, and Stop remains dismissed after refresh")
     @MainActor
     func desktopStopReconciliation() async throws {
