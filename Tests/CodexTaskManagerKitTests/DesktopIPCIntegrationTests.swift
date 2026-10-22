@@ -78,6 +78,24 @@ import Testing
         let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client, requestTimeout: .milliseconds(50))
         await #expect(throws: (any Error).self) { try await ipc.ownerClientID(for: "no-reply") }
     }
+    @Test func unavailableSnapshotUnfollowsWithoutInventingIdle() async throws {
+        let (client, server) = try pair()
+        let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client, snapshotTimeout: .milliseconds(50))
+        let worker = Task.detached {
+            defer { try? server.close() }
+            let initialize = try readMessage(server)
+            try send(server, response(initialize, result: .object(["clientId": .string("test-client")])))
+            let discovery = try readMessage(server)
+            try send(server, response(discovery))
+            let follow = try readMessage(server)
+            #expect(follow["params"]?.objectValue?["following"] == .bool(true))
+            let unfollow = try readMessage(server)
+            #expect(unfollow["params"]?.objectValue?["following"] == .bool(false))
+            #expect(unfollow["params"]?.objectValue?["conversationId"] == .string("unavailable"))
+        }
+        #expect(try await ipc.attentionState(for: "unavailable") == nil)
+        try await worker.value
+    }
     @Test func oversizedFrameFailsClosed() async throws {
         let (client, server) = try pair()
         let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client)

@@ -1904,6 +1904,33 @@ struct CodexTaskManagerKitTests {
         #expect(CodexDesktopRuntimeDetector.isPrivateDesktopAppServerCommand(["/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex", "app-server", "--listen", "stdio://"]))
     }
 
+    @Test("Idle Desktop chats are reconciled for asynchronous input")
+    @MainActor
+    func idleAsyncQuestionReconciliation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory.appending(path: "sessions"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let rollout = directory.appending(path: "sessions/rollout.jsonl")
+        try write([
+            line(type: "session_meta", payload: ["originator": "Codex Desktop"]),
+            line(type: "event_msg", payload: ["type": "task_complete"]),
+        ], to: rollout)
+        try makeCatalog(at: directory.appending(path: "state_5.sqlite"), rolloutPath: rollout.path)
+        let id = "00000000-0000-0000-0000-000000000001"
+        let controller = RecordingApprovalController(liveStates: [id: .needsResponse])
+        let repository = CodexTaskRepository(codexHome: directory, desktopRuntimeStartDateProvider: { nil })
+        let suite = "CodexTaskManagerTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = TaskManagerModel(repository: repository, defaults: defaults, approvalController: controller)
+        await model.refresh()
+        #expect(model.tasks.first?.state == .needsResponse)
+        #expect(model.attentionCount == 1)
+        #expect(await controller.recordedLiveStateRequestIDs() == [id])
+        model.selectOnlyAttentionFilters()
+        #expect(model.presentation.sections.flatMap(\.tasks).count == 1)
+    }
+
     @Test("Desktop stale approval reconciles despite a private server, and Stop remains dismissed after refresh")
     @MainActor
     func desktopStopReconciliation() async throws {

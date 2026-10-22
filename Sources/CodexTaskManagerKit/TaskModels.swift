@@ -122,6 +122,7 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
     public let isPinned: Bool
     public let isUnread: Bool
     public let isDesktopManaged: Bool
+    public let hasLocalActivity: Bool
     public let state: TaskAttentionState
 
     public init(
@@ -133,6 +134,7 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
         isPinned: Bool,
         isUnread: Bool = false,
         isDesktopManaged: Bool = true,
+        hasLocalActivity: Bool = true,
         state: TaskAttentionState
     ) {
         self.id = id
@@ -143,6 +145,7 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
         self.isPinned = isPinned
         self.isUnread = isUnread
         self.isDesktopManaged = isDesktopManaged
+        self.hasLocalActivity = hasLocalActivity
         self.state = state
     }
 
@@ -167,6 +170,7 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
             isPinned: isPinned,
             isUnread: isUnread,
             isDesktopManaged: isDesktopManaged,
+            hasLocalActivity: hasLocalActivity,
             state: state
         )
     }
@@ -176,6 +180,7 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
             id: id, title: title, projectPath: projectPath,
             latestAssistantMessage: latestAssistantMessage, recency: recency,
             isPinned: isPinned, isUnread: false, isDesktopManaged: isDesktopManaged,
+            hasLocalActivity: hasLocalActivity,
             state: state == .complete ? .idle : state
         )
     }
@@ -190,6 +195,7 @@ public struct CodexTask: Identifiable, Hashable, Sendable {
             isPinned: isPinned,
             isUnread: isUnread,
             isDesktopManaged: isDesktopManaged,
+            hasLocalActivity: hasLocalActivity,
             state: state
         )
     }

@@ -422,9 +422,15 @@ public final class TaskManagerModel {
     private func reconcileLiveApprovalStates(in scannedTasks: [CodexTask]) async -> [CodexTask] {
         guard let approvalController else { return scannedTasks }
         var reconciled = scannedTasks
-        // Only positive rollout states need live reconciliation. Bound concurrency
-        // so a stale catalogue cannot issue thousands of simultaneous IPC reads.
-        let candidates = scannedTasks.filter { [.running, .needsApproval, .needsResponse].contains($0.state) }
+        // Async questions can remain unanswered while the owner is idle and
+        // outside the bounded rollout tail. Check Desktop ownership as well as
+        // positive rollout states. Exclude catalogue-only historical entries
+        // without local activity, and bound concurrency and snapshot waits.
+        // An unavailable snapshot preserves the scanned state.
+        let candidates = scannedTasks.filter {
+            ($0.isDesktopManaged && $0.hasLocalActivity)
+                || [.running, .needsApproval, .needsResponse].contains($0.state)
+        }
         var live: [String: TaskAttentionState] = [:]
         await withTaskGroup(of: (String, TaskAttentionState?).self) { group in
             var iterator = candidates.makeIterator()

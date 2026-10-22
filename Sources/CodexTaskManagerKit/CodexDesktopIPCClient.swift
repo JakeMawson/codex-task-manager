@@ -5,6 +5,7 @@ actor CodexDesktopIPCClient {
     private let socketPath: String
     private var connectedHandleForTesting: FileHandle?
     private let requestTimeout: Duration
+    private let snapshotTimeout: Duration
     private var socketHandle: FileHandle?
     private var readerTask: Task<Void, Never>?
     private var inputContinuation: AsyncStream<Data>.Continuation?
@@ -20,15 +21,18 @@ actor CodexDesktopIPCClient {
     static func attentionState(in state: [String: JSONValue]) -> TaskAttentionState? {
         guard let runtime = state["threadRuntimeStatus"]?.objectValue,
               let type = runtime["type"]?.stringValue else { return nil }
-        guard type == "active" else { return ["idle", "notLoaded", "systemError"].contains(type) ? .idle : nil }
         let flags = Set(runtime["activeFlags"]?.arrayValue?.compactMap(\.stringValue) ?? [])
-        if flags.contains("waitingOnApproval") { return .needsApproval }
+        if type == "active", flags.contains("waitingOnApproval") { return .needsApproval }
+        if NativeAsyncQuestions.hasPending(in: state) { return .needsResponse }
+        guard type == "active" else { return ["idle", "notLoaded", "systemError"].contains(type) ? .idle : nil }
         if flags.contains("waitingOnUserInput") { return .needsResponse }
         return .running
     }
 
     func attentionState(for threadID: String) async throws -> TaskAttentionState? {
-        guard try await ownerClientID(for: threadID) != nil else { return .idle }
+        // Status discovery must not spend the action timeout on every unloaded
+        // historical chat. A timeout is unknown and preserves rollout state.
+        guard try await ownerClientID(for: threadID, timeout: .seconds(1)) != nil else { return .idle }
         // Observe the actual Desktop owner. Resuming the same thread on a
         // separate daemon does not report that owner's runtime state.
         let result = await withCheckedContinuation { continuation in
@@ -36,7 +40,7 @@ actor CodexDesktopIPCClient {
             snapshots[threadID] = continuation
             snapshotTimeouts.removeValue(forKey: threadID)?.cancel()
             snapshotTimeouts[threadID] = Task { [weak self] in
-                do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                do { try await Task.sleep(for: self?.snapshotTimeout ?? .seconds(1)) } catch { return }
                 await self?.finishSnapshot(threadID, state: nil)
             }
             do { try following(threadID, true) }
@@ -61,13 +65,14 @@ actor CodexDesktopIPCClient {
     }
 
     init(socketPath: String = FileManager.default.homeDirectoryForCurrentUser
-        .appending(path: ".codex/ipc/ipc.sock").path, connectedHandleForTesting: FileHandle? = nil, requestTimeout: Duration = .seconds(5)) {
+        .appending(path: ".codex/ipc/ipc.sock").path, connectedHandleForTesting: FileHandle? = nil, requestTimeout: Duration = .seconds(5), snapshotTimeout: Duration = .seconds(1)) {
         self.socketPath = socketPath
         self.connectedHandleForTesting = connectedHandleForTesting
         self.requestTimeout = requestTimeout
+        self.snapshotTimeout = snapshotTimeout
     }
 
-    func ownerClientID(for threadID: String) async throws -> String? {
+    func ownerClientID(for threadID: String, timeout: Duration? = nil) async throws -> String? {
         try await start()
         let response = try await request(
             method: "thread-owner-discovery",
@@ -75,7 +80,8 @@ actor CodexDesktopIPCClient {
                 "hostId": .string("local"),
                 "conversationId": .string(threadID),
             ]),
-            version: 1
+            version: 1,
+            timeout: timeout
         )
         guard response["resultType"]?.stringValue == "success" else {
             if response["error"]?.stringValue == "no-client-found" { return nil }
@@ -165,7 +171,8 @@ actor CodexDesktopIPCClient {
         params: JSONValue,
         version: Int,
         targetClientID: String? = nil,
-        permitsUninitializedClient: Bool = false
+        permitsUninitializedClient: Bool = false,
+        timeout: Duration? = nil
     ) async throws -> [String: JSONValue] {
         guard permitsUninitializedClient || clientID != "initializing-client" else {
             throw TaskApprovalControllerError.connectionClosed
@@ -186,7 +193,7 @@ actor CodexDesktopIPCClient {
         return try await withCheckedThrowingContinuation { continuation in
             pendingRequests[requestID] = continuation
             requestTimeouts[requestID] = Task { [weak self] in
-                do { try await Task.sleep(for: self?.requestTimeout ?? .seconds(5)) } catch { return }
+                do { try await Task.sleep(for: min(self?.requestTimeout ?? .seconds(5), timeout ?? .seconds(5))) } catch { return }
                 await self?.expireRequest(requestID)
             }
             do {

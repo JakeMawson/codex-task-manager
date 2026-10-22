@@ -1,6 +1,6 @@
 # Releases
 
-Release version: **0.2.1, build 6**. This release synchronizes local unread state with Codex and adds configurable simulated/automated read actions with optional guarded Back navigation. Release archives contain only the signed application and its nested menu agent. Source, logs, signing credentials and local chat data do not belong in an archive.
+Release version: **0.2.2, build 7**. This release detects asynchronous questions in Needs, including questions without a waiting flag and questions left open while idle. It matches structured answers by question identity and preserves approval priority. Release archives contain only the signed application and its nested menu agent. Source, logs, signing credentials and local chat data do not belong in an archive.
 
 The launcher and agent retain their existing identities:
 
@@ -13,7 +13,7 @@ The independent launch bridge dynamically resolves a private macOS responsibilit
 
 1. Run `swift test --jobs 2` against the frozen release source.
 2. Inspect the actual menu item, task panel, settings, approval/response states, search/filter/project controls, dismissal and quit/relaunch. Confirm duplicate opens converge to one agent. Inspect a native top strip and enlarged target crop; process/Accessibility metadata alone is insufficient.
-3. Reconcile positive status entries with their actual Desktop owner. Exercise Stop with disposable protocol/model fixtures; stop a real active chat only with specific authority.
+3. Replay asynchronous question acknowledgement, unanswered/answered and skipped states, partial replies, later-turn answers and idle questions. Reconcile positive status entries with their actual Desktop owner. Exercise Stop with disposable protocol/model fixtures; stop a real active chat only with specific authority.
 4. Check automatic-update opt-out, preparation persistence, failed check/staging/install, post-install identity/version validation and relaunch handling.
 5. Review public source for private paths, credentials, chat content and unintended artifacts. See `Support/SECURITY_AUDIT_HACKERONE.md` for scope and residual risks.
 
@@ -22,19 +22,19 @@ The independent launch bridge dynamically resolves a private macOS responsibilit
 Use an absolute **fresh** output under `build/releases/`; packaging never empties an existing destination.
 
 ```sh
-Scripts/package-release /absolute/checkout/build/releases/0.2.1-unique 'Developer ID Application: Publisher (TEAMID)'
-Scripts/finalize-release /absolute/checkout/build/releases/0.2.1-unique
+Scripts/package-release /absolute/checkout/build/releases/0.2.2-unique 'Developer ID Application: Publisher (TEAMID)'
+Scripts/finalize-release /absolute/checkout/build/releases/0.2.2-unique
 ```
 
 Both architectures are built with two Swift workers. Signing requires the publisher’s Developer ID certificate. Notarization uses this app’s existing dedicated **Codex Task Manager Notary** Keychain profile. Credentials stay in Keychain; never borrow another app’s profile or put passwords in source/arguments. New credential setup requires its separate owner handoff.
 
-Finalize submits the exact signed archive, waits for acceptance, staples and validates the app, verifies strict signatures and Gatekeeper, then creates `Codex-Task-Manager-0.2.1.zip` and prints its SHA-256.
+Finalize submits the exact signed archive, waits for acceptance, staples and validates the app, verifies strict signatures and Gatekeeper, then creates `Codex-Task-Manager-0.2.2.zip` and prints its SHA-256.
 
 ## Publish and install
 
 Public source pushes, tags, GitHub release/asset writes and tap changes require the owner’s current exact publication instruction. Preserve the pre-push guard. Never force-push or silently replace existing release bytes.
 
-1. Push the reviewed source commit and matching `v0.2.1` tag.
+1. Push the reviewed source commit and matching `v0.2.2` tag.
 2. Publish a stable GitHub release with only the finalized ZIP and its SHA-256 text.
 3. Update the existing `JakeMawson/tap/codex-task-manager` cask to that version and digest. Preserve its publisher, bundle-ID and notarization preflight checks; these run before app installation. Use `xcrun stapler validate` for the ticket; `spctl` assessment cannot access its Mach service inside Homebrew’s cask sandbox. The updater assesses Gatekeeper outside that sandbox before relaunch.
 4. Fetch through Homebrew, compare the exact public digest, then upgrade the installed app. Preserve preferences and Application Support. Recheck both installed identities, universal architectures, strict signatures, stapling, Gatekeeper and version. Also run `/usr/bin/gktool scan` against the installed bundle; unlike static assessment, this exercises the execution scan used by ordinary launch.

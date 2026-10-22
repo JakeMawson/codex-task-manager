@@ -217,6 +217,7 @@ public actor CodexTaskRepository {
                 isPinned: row.isPinned,
                 isUnread: isUnread,
                 isDesktopManaged: isDesktopManaged,
+                hasLocalActivity: snapshotResult.snapshots[row.rolloutPath] != nil,
                 state: state
             )
         }
