@@ -15,11 +15,26 @@ public enum TaskApprovalControllerError: LocalizedError, Sendable {
 public protocol TaskApprovalControlling: Sendable {
     func liveAttentionState(for threadID: String) async -> TaskAttentionState?
     func liveAttentionState(for threadID: String, isDesktopManaged: Bool) async -> TaskAttentionState?
+    func liveAttentionStates(for tasks: [CodexTask]) async -> [String: TaskAttentionState]
     func pause(threadID: String) async throws
     func pause(threadID: String, isDesktopManaged: Bool) async throws
 }
 
 extension TaskApprovalControlling {
+    public func liveAttentionStates(for tasks: [CodexTask]) async -> [String: TaskAttentionState] {
+        var states: [String: TaskAttentionState] = [:]
+        await withTaskGroup(of: (String, TaskAttentionState?).self) { group in
+            var iterator = tasks.makeIterator()
+            for _ in 0..<min(8, tasks.count) {
+                if let task = iterator.next() { group.addTask { (task.id, await self.liveAttentionState(for: task.id, isDesktopManaged: task.isDesktopManaged)) } }
+            }
+            while let (id, state) = await group.next() {
+                if let state { states[id] = state }
+                if let task = iterator.next() { group.addTask { (task.id, await self.liveAttentionState(for: task.id, isDesktopManaged: task.isDesktopManaged)) } }
+            }
+        }
+        return states
+    }
     public func pause(threadID: String, isDesktopManaged: Bool) async throws { try await pause(threadID: threadID) }
     public func liveAttentionState(for threadID: String, isDesktopManaged: Bool) async -> TaskAttentionState? {
         await liveAttentionState(for: threadID)
@@ -119,6 +134,9 @@ public actor CodexTaskApprovalController: TaskApprovalControlling {
         // A missing Desktop owner says nothing about CLI/extension processes.
         guard isDesktopManaged else { return nil }
         return await liveAttentionState(for: threadID)
+    }
+    public func liveAttentionStates(for tasks: [CodexTask]) async -> [String: TaskAttentionState] {
+        await desktopIPC.attentionStates(for: tasks.filter(\.isDesktopManaged).map(\.id))
     }
     public func pause(threadID: String, isDesktopManaged: Bool) async throws {
         guard isDesktopManaged else { throw TaskApprovalControllerError.protocolError("Stop this CLI or extension task in the app that owns it.") }

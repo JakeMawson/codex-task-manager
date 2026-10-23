@@ -72,6 +72,100 @@ import Testing
         try await ipc.pause(threadID: "a", ownerClientID: "owner")
         try await worker.value
     }
+    @Test func largeSnapshotBurstDoesNotDropPendingQuestion() async throws {
+        let (client, server) = try pair()
+        let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client, snapshotTimeout: .seconds(5))
+        let worker = Task.detached {
+            defer { try? server.close() }
+            let initialize = try readMessage(server)
+            try send(server, response(initialize, result: .object(["clientId": .string("test-client")])))
+            let discovery = try readMessage(server)
+            try send(server, response(discovery))
+            _ = try readMessage(server) // follow
+            // Other followed chats can broadcast large histories on this same
+            // socket. More than 128 small reads arrive while JSON is decoded.
+            let noise = try JSONEncoder().encode(JSONValue.object([
+                "type": .string("broadcast"), "padding": .string(String(repeating: "x", count: 4 * 1024 * 1024)),
+            ]))
+            var length = UInt32(noise.count).littleEndian
+            var burst = Data(bytes: &length, count: 4); burst.append(noise)
+            // Pre-encode before writing: encoding each frame between writes
+            // accidentally throttles the producer and conceals the overflow.
+            for _ in 0..<8 { try server.write(contentsOf: burst) }
+            try send(server, ["type": .string("broadcast"), "method": .string("thread-stream-state-changed"), "params": .object([
+                "hostId": .string("local"), "conversationId": .string("pending-question"),
+                "change": .object(["type": .string("snapshot"), "conversationState": .object([
+                    "threadRuntimeStatus": .object(["type": .string("active"), "activeFlags": .array([])]),
+                    "turns": .array([.object(["items": .array([.object([
+                        "type": .string("agentMessage"), "delivery": .string("async"), "id": .string("call-burst"),
+                        "questions": .array([.object(["title": .string("Please choose.")])]),
+                    ])])])]),
+                ])]),
+            ])])
+            _ = try readMessage(server) // unfollow
+        }
+        #expect(try await ipc.attentionState(for: "pending-question") == .needsResponse)
+        try await worker.value
+    }
+
+    @Test func busyDesktopCanReplyAfterOneSecond() async throws {
+        let (client, server) = try pair()
+        let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client)
+        let worker = Task.detached {
+            defer { try? server.close() }
+            let initialize = try readMessage(server)
+            try send(server, response(initialize, result: .object(["clientId": .string("test-client")])))
+            let discovery = try readMessage(server)
+            try await Task.sleep(for: .milliseconds(1150))
+            try send(server, response(discovery))
+            _ = try readMessage(server)
+            try await Task.sleep(for: .milliseconds(1150))
+            try send(server, ["type": .string("broadcast"), "method": .string("thread-stream-state-changed"), "params": .object([
+                "hostId": .string("local"), "conversationId": .string("busy"),
+                "change": .object(["type": .string("snapshot"), "conversationState": .object([
+                    "threadRuntimeStatus": .object(["type": .string("active"), "activeFlags": .array([.string("waitingOnUserInput")])]),
+                ])]),
+            ])])
+            _ = try readMessage(server)
+        }
+        #expect(try await ipc.attentionState(for: "busy") == .needsResponse)
+        try await worker.value
+    }
+
+    @Test func batchDiscoversOwnersBeforeFollowingHistories() async throws {
+        let (client, server) = try pair()
+        let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client)
+        let worker = Task.detached {
+            defer { try? server.close() }
+            let initialize = try readMessage(server)
+            try send(server, response(initialize, result: .object(["clientId": .string("test-client")])))
+            var discoveries: [[String: JSONValue]] = []
+            for _ in 0..<3 {
+                let message = try readMessage(server)
+                #expect(message["method"] == .string("thread-owner-discovery"))
+                discoveries.append(message)
+            }
+            for discovery in discoveries { try send(server, response(discovery)) }
+            var unfollows = 0
+            while unfollows < 3 {
+                let follow = try readMessage(server)
+                #expect(follow["method"] == .string("thread-stream-following-changed"))
+                let params = follow["params"]!.objectValue!
+                if params["following"] == .bool(false) { unfollows += 1; continue }
+                try send(server, ["type": .string("broadcast"), "method": .string("thread-stream-state-changed"), "params": .object([
+                    "hostId": .string("local"), "conversationId": params["conversationId"]!,
+                    "change": .object(["type": .string("snapshot"), "conversationState": .object([
+                        "threadRuntimeStatus": .object(["type": .string("active"), "activeFlags": .array([.string("waitingOnUserInput")])]),
+                    ])]),
+                ])])
+            }
+        }
+        let states = await ipc.attentionStates(for: ["first", "second", "third"])
+        #expect(states.count == 3)
+        #expect(states.values.allSatisfy { $0 == .needsResponse })
+        try await worker.value
+    }
+
     @Test func missingResponseTimesOut() async throws {
         let (client, server) = try pair()
         defer { try? server.close() }

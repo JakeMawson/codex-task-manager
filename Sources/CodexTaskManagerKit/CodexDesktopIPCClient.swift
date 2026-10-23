@@ -8,7 +8,7 @@ actor CodexDesktopIPCClient {
     private let snapshotTimeout: Duration
     private var socketHandle: FileHandle?
     private var readerTask: Task<Void, Never>?
-    private var inputContinuation: AsyncStream<Data>.Continuation?
+    private let readQueue = DispatchQueue(label: "com.jakemawson.codex-task-manager.ipc-read")
     private var connectionID = UUID()
     private var incomingBuffer = Data()
     private var clientID = "initializing-client"
@@ -29,24 +29,100 @@ actor CodexDesktopIPCClient {
         return .running
     }
 
+    // Native histories contain large tool outputs and reasoning that cannot
+    // affect attention. Project the wire snapshot before generic Codable
+    // decoding, so another chat cannot consume this chat's snapshot deadline.
+    static func attentionState(inNativeState state: [String: Any]) -> TaskAttentionState? {
+        var turns = state["turns"] as? [[String: Any]] ?? []
+        if let history = state["turnHistory"] as? [String: Any],
+           let entries = history["history"] as? [String: Any],
+           let entities = entries["entitiesByKey"] as? [String: Any] {
+            turns.append(contentsOf: entities.values.compactMap { $0 as? [String: Any] })
+        }
+        let items = turns.flatMap { $0["items"] as? [[String: Any]] ?? [] }.compactMap { item -> [String: Any]? in
+            guard let type = item["type"] as? String else { return nil }
+            switch type {
+            case "agentMessage" where item["delivery"] as? String == "async":
+                return item.filter { ["type", "id", "delivery", "questions"].contains($0.key) }
+            case "userMessage", "steeringUserMessage":
+                return item.filter { ["type", "status", "content", "input"].contains($0.key) }
+            default: return nil
+            }
+        }
+        let minimal: [String: Any] = [
+            "threadRuntimeStatus": state["threadRuntimeStatus"] ?? NSNull(),
+            "turns": [["items": items]],
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: minimal),
+              let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) else { return nil }
+        return attentionState(in: decoded)
+    }
+
     func attentionState(for threadID: String) async throws -> TaskAttentionState? {
-        // Status discovery must not spend the action timeout on every unloaded
-        // historical chat. A timeout is unknown and preserves rollout state.
-        guard try await ownerClientID(for: threadID, timeout: .seconds(1)) != nil else { return .idle }
-        // Observe the actual Desktop owner. Resuming the same thread on a
-        // separate daemon does not report that owner's runtime state.
+        // A busy Desktop may take over one second to answer. A timeout is
+        // unknown and preserves rollout state; batch discovery amortizes waits.
+        guard try await ownerClientID(for: threadID, timeout: .seconds(5)) != nil else { return .idle }
+        return await snapshot(for: threadID)
+    }
+
+    private func snapshot(for threadID: String) async -> TaskAttentionState? {
+        // Observe the actual Desktop owner; a separate daemon cannot report it.
         let result = await withCheckedContinuation { continuation in
             snapshots.removeValue(forKey: threadID)?.resume(returning: nil)
             snapshots[threadID] = continuation
             snapshotTimeouts.removeValue(forKey: threadID)?.cancel()
             snapshotTimeouts[threadID] = Task { [weak self] in
-                do { try await Task.sleep(for: self?.snapshotTimeout ?? .seconds(1)) } catch { return }
+                do { try await Task.sleep(for: self?.snapshotTimeout ?? .seconds(5)) } catch { return }
                 await self?.finishSnapshot(threadID, state: nil)
             }
             do { try following(threadID, true) }
             catch { finishSnapshot(threadID, state: nil) }
         }
         return result
+    }
+
+    private enum Ownership: Sendable {
+        case present, absent, unavailable
+    }
+
+    func attentionStates(for threadIDs: [String]) async -> [String: TaskAttentionState] {
+        // Discovery responses are tiny. Complete them before following any
+        // large histories, so absent owners share one bounded wait rather than
+        // occupying every snapshot slot for successive five-second waves.
+        var ownership: [String: Ownership] = [:]
+        await withTaskGroup(of: (String, Ownership).self) { group in
+            var iterator = threadIDs.makeIterator()
+            for _ in 0..<min(64, threadIDs.count) {
+                if let id = iterator.next() {
+                    group.addTask { await self.discoverOwnership(for: id) }
+                }
+            }
+            while let (id, owner) = await group.next() {
+                ownership[id] = owner
+                if let id = iterator.next() {
+                    group.addTask { await self.discoverOwnership(for: id) }
+                }
+            }
+        }
+        var states: [String: TaskAttentionState] = [:]
+        for (id, owner) in ownership where owner == .absent { states[id] = .idle }
+        let owned = threadIDs.filter { ownership[$0] == .present }
+        await withTaskGroup(of: (String, TaskAttentionState?).self) { group in
+            var iterator = owned.makeIterator()
+            for _ in 0..<min(8, owned.count) {
+                if let id = iterator.next() { group.addTask { (id, await self.snapshot(for: id)) } }
+            }
+            while let (id, state) = await group.next() {
+                if let state { states[id] = state }
+                if let id = iterator.next() { group.addTask { (id, await self.snapshot(for: id)) } }
+            }
+        }
+        return states
+    }
+
+    private func discoverOwnership(for id: String) async -> (String, Ownership) {
+        do { return (id, try await ownerClientID(for: id) == nil ? .absent : .present) }
+        catch { return (id, .unavailable) }
     }
 
     private func following(_ threadID: String, _ enabled: Bool) throws {
@@ -65,7 +141,7 @@ actor CodexDesktopIPCClient {
     }
 
     init(socketPath: String = FileManager.default.homeDirectoryForCurrentUser
-        .appending(path: ".codex/ipc/ipc.sock").path, connectedHandleForTesting: FileHandle? = nil, requestTimeout: Duration = .seconds(5), snapshotTimeout: Duration = .seconds(1)) {
+        .appending(path: ".codex/ipc/ipc.sock").path, connectedHandleForTesting: FileHandle? = nil, requestTimeout: Duration = .seconds(5), snapshotTimeout: Duration = .seconds(5)) {
         self.socketPath = socketPath
         self.connectedHandleForTesting = connectedHandleForTesting
         self.requestTimeout = requestTimeout
@@ -134,19 +210,32 @@ actor CodexDesktopIPCClient {
         connectedHandleForTesting = nil
         let generation = UUID()
         connectionID = generation
-        let (stream, continuation) = AsyncStream<Data>.makeStream(bufferingPolicy: .bufferingOldest(128))
-        inputContinuation = continuation
-        // Consume frames in read order; separate unstructured tasks per chunk
-        // can reorder a split frame on their way into the actor.
+        let readQueue = self.readQueue
+        // Apply backpressure at the socket. A bounded queue of small chunks can
+        // overflow while another chat's large snapshot is decoded, discarding
+        // the pending-question frame and silently falling back to Running.
+        // One awaited read retains frame order and bounds queued data to 64 KiB;
+        // blocking I/O lives on its own queue, outside the cooperative executor.
         readerTask = Task { [weak self] in
-            for await data in stream {
+            while !Task.isCancelled {
+                let data: Data = await withCheckedContinuation { continuation in
+                    readQueue.async {
+                        var data = Data(count: 64 * 1024)
+                        let count = data.withUnsafeMutableBytes { bytes in
+                            var count: Int
+                            repeat { count = Darwin.read(handle.fileDescriptor, bytes.baseAddress, bytes.count) }
+                            while count < 0 && errno == EINTR
+                            return count
+                        }
+                        if count > 0 { data.count = count }
+                        else { data = Data() }
+                        continuation.resume(returning: data)
+                    }
+                }
                 guard !Task.isCancelled else { return }
                 await self?.receive(data, generation: generation)
+                if data.isEmpty { return }
             }
-            await self?.receive(Data(), generation: generation)
-        }
-        handle.readabilityHandler = { handle in
-            if case .dropped = continuation.yield(handle.availableData) { continuation.finish() }
         }
         socketHandle = handle
 
@@ -238,24 +327,26 @@ actor CodexDesktopIPCClient {
             guard incomingBuffer.count >= 4 + payloadLength else { return }
             let payload = Data(incomingBuffer[4..<(4 + payloadLength)])
             incomingBuffer.removeSubrange(..<(4 + payloadLength))
+            guard let native = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { continue }
+            if native["type"] as? String == "broadcast" {
+                // Ignore unrelated broadcasts before recursively decoding any
+                // history, including frames arriving after we unfollowed it.
+                if native["method"] as? String == "thread-stream-state-changed",
+                   let params = native["params"] as? [String: Any], params["hostId"] as? String == "local",
+                   let id = params["conversationId"] as? String, snapshots[id] != nil,
+                   let change = params["change"] as? [String: Any], change["type"] as? String == "snapshot",
+                   let state = change["conversationState"] as? [String: Any] {
+                    finishSnapshot(id, state: Self.attentionState(inNativeState: state))
+                }
+                continue
+            }
             guard let value = try? JSONDecoder().decode(JSONValue.self, from: payload),
-                  let message = value.objectValue
-            else { continue }
+                  let message = value.objectValue else { continue }
             handle(message)
         }
     }
 
     private func handle(_ message: [String: JSONValue]) {
-        if message["type"]?.stringValue == "broadcast",
-           message["method"]?.stringValue == "thread-stream-state-changed",
-           let params = message["params"]?.objectValue,
-           params["hostId"]?.stringValue == "local",
-           let id = params["conversationId"]?.stringValue,
-           let change = params["change"]?.objectValue,
-           change["type"]?.stringValue == "snapshot",
-           let state = change["conversationState"]?.objectValue {
-            finishSnapshot(id, state: Self.attentionState(in: state))
-        }
         if message["type"]?.stringValue == "response",
            let requestID = message["requestId"]?.stringValue,
            let continuation = pendingRequests.removeValue(forKey: requestID) {
@@ -284,12 +375,13 @@ actor CodexDesktopIPCClient {
 
     private func connectionDidClose() {
         connectionID = UUID()
-        inputContinuation?.finish()
-        inputContinuation = nil
         readerTask?.cancel()
         readerTask = nil
-        socketHandle?.readabilityHandler = nil
-        try? socketHandle?.close()
+        if let handle = socketHandle {
+            Darwin.shutdown(handle.fileDescriptor, SHUT_RDWR)
+            // Serialize close after the in-flight read, before any next read.
+            readQueue.async { try? handle.close() }
+        }
         socketHandle = nil
         incomingBuffer.removeAll()
         clientID = "initializing-client"

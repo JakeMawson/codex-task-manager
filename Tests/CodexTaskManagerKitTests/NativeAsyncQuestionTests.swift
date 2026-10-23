@@ -68,6 +68,8 @@ struct NativeAsyncQuestionTests {
                 state["turns"] = .array((state["turns"]?.arrayValue ?? []) + [extra])
             }
             #expect(CodexDesktopIPCClient.attentionState(in: state) == expected, "\(scenario), paginated=\(paginated)")
+            let native = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as! [String: Any]
+            #expect(CodexDesktopIPCClient.attentionState(inNativeState: native) == expected, "Wire projection: \(scenario), paginated=\(paginated)")
         }
     }
 

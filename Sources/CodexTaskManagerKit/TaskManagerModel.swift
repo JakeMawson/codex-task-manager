@@ -431,21 +431,7 @@ public final class TaskManagerModel {
             ($0.isDesktopManaged && $0.hasLocalActivity)
                 || [.running, .needsApproval, .needsResponse].contains($0.state)
         }
-        var live: [String: TaskAttentionState] = [:]
-        await withTaskGroup(of: (String, TaskAttentionState?).self) { group in
-            var iterator = candidates.makeIterator()
-            for _ in 0..<min(8, candidates.count) {
-                if let task = iterator.next() {
-                    group.addTask { (task.id, await approvalController.liveAttentionState(for: task.id, isDesktopManaged: task.isDesktopManaged)) }
-                }
-            }
-            while let (id, state) = await group.next() {
-                if let state { live[id] = state }
-                if let task = iterator.next() {
-                    group.addTask { (task.id, await approvalController.liveAttentionState(for: task.id, isDesktopManaged: task.isDesktopManaged)) }
-                }
-            }
-        }
+        let live = await approvalController.liveAttentionStates(for: candidates)
         for index in reconciled.indices {
             let task = reconciled[index]
             if let state = live[task.id] {
