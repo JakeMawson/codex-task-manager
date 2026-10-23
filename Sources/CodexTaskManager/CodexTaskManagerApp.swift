@@ -1,5 +1,6 @@
 import CodexTaskManagerKit
 import AppKit
+import Observation
 import SwiftUI
 
 @main @MainActor
@@ -33,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var statusPopover = NSPopover()
     private var settingsWindow: NSWindow?
     private var previewWindow: NSWindow?
-    private var statusRefreshTimer: Timer?
+    private var observesStatusSummary = false
     private var registrationAttempt = 0
     private var outsideClickMonitors: [Any] = []
     private static let reopenNotification = Notification.Name("com.jakemawson.codex-task-manager.menuagent.show-tasks")
@@ -142,10 +143,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             installEscapeKeyMonitor()
         }
         Self.taskManagerModel.startBackgroundRefresh()
-        refreshStatusSummary()
-        statusRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.refreshStatusSummary() }
-        }
+        observesStatusSummary = true
+        observeStatusSummary()
         logLifecycle("status item configured")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak item] in
             guard let self, let item, self.statusItem === item else { return }
@@ -171,6 +170,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.title = needs > 0 ? " \(needs)" : ""
         button.toolTip = "Codex Task Manager · \(needs) need you · \(running) running · \(complete) complete"
         button.setAccessibilityLabel(button.toolTip!)
+    }
+
+    private func observeStatusSummary() {
+        guard observesStatusSummary else { return }
+        withObservationTracking {
+            refreshStatusSummary()
+        } onChange: { [weak self] in
+            // Observation fires before the model mutation completes. Read its
+            // new counts on the next main-actor turn and rearm observation.
+            Task { @MainActor [weak self] in self?.observeStatusSummary() }
+        }
     }
 
     private func logLifecycle(_ message: String) {
@@ -206,7 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        statusRefreshTimer?.invalidate()
+        observesStatusSummary = false
         statusPopover.close()
         for monitor in outsideClickMonitors { NSEvent.removeMonitor(monitor) }
         outsideClickMonitors.removeAll()

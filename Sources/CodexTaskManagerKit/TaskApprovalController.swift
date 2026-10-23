@@ -16,11 +16,15 @@ public protocol TaskApprovalControlling: Sendable {
     func liveAttentionState(for threadID: String) async -> TaskAttentionState?
     func liveAttentionState(for threadID: String, isDesktopManaged: Bool) async -> TaskAttentionState?
     func liveAttentionStates(for tasks: [CodexTask]) async -> [String: TaskAttentionState]
+    func attentionUpdates() async -> AsyncStream<[String: TaskAttentionState]>
     func pause(threadID: String) async throws
     func pause(threadID: String, isDesktopManaged: Bool) async throws
 }
 
 extension TaskApprovalControlling {
+    public func attentionUpdates() async -> AsyncStream<[String: TaskAttentionState]> {
+        AsyncStream { $0.finish() }
+    }
     public func liveAttentionStates(for tasks: [CodexTask]) async -> [String: TaskAttentionState] {
         var states: [String: TaskAttentionState] = [:]
         await withTaskGroup(of: (String, TaskAttentionState?).self) { group in
@@ -137,6 +141,9 @@ public actor CodexTaskApprovalController: TaskApprovalControlling {
     }
     public func liveAttentionStates(for tasks: [CodexTask]) async -> [String: TaskAttentionState] {
         await desktopIPC.attentionStates(for: tasks.filter(\.isDesktopManaged).map(\.id))
+    }
+    public func attentionUpdates() async -> AsyncStream<[String: TaskAttentionState]> {
+        await desktopIPC.attentionUpdates()
     }
     public func pause(threadID: String, isDesktopManaged: Bool) async throws {
         guard isDesktopManaged else { throw TaskApprovalControllerError.protocolError("Stop this CLI or extension task in the app that owns it.") }

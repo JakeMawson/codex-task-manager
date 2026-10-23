@@ -96,7 +96,7 @@ import Testing
                 "hostId": .string("local"), "conversationId": .string("pending-question"),
                 "change": .object(["type": .string("snapshot"), "conversationState": .object([
                     "threadRuntimeStatus": .object(["type": .string("active"), "activeFlags": .array([])]),
-                    "turns": .array([.object(["items": .array([.object([
+                    "turns": .array([.object(["status": .string("inProgress"), "items": .array([.object([
                         "type": .string("agentMessage"), "delivery": .string("async"), "id": .string("call-burst"),
                         "questions": .array([.object(["title": .string("Please choose.")])]),
                     ])])])]),
@@ -163,6 +163,46 @@ import Testing
         let states = await ipc.attentionStates(for: ["first", "second", "third"])
         #expect(states.count == 3)
         #expect(states.values.allSatisfy { $0 == .needsResponse })
+        try await worker.value
+    }
+
+    @Test func followedAnswerPublishesImmediatelyAndRecoversRevisionGap() async throws {
+        let (client, server) = try pair()
+        let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client)
+        // A terminated prior subscriber must not tear down its replacement.
+        _ = await ipc.attentionUpdates()
+        let stream = await ipc.attentionUpdates()
+        let worker = Task.detached {
+            defer { try? server.close() }
+            let initialize = try readMessage(server)
+            try send(server, response(initialize, result: .object(["clientId": .string("test-client")])))
+            try send(server, response(try readMessage(server)))
+            let follow = try readMessage(server)
+            #expect(follow["params"]?.objectValue?["following"] == .bool(true))
+            func broadcast(_ change: [String: Any]) throws {
+                let data = try JSONSerialization.data(withJSONObject: change)
+                let value = try JSONDecoder().decode(JSONValue.self, from: data)
+                try send(server, ["type": .string("broadcast"), "method": .string("thread-stream-state-changed"), "params": .object(["hostId": .string("local"), "conversationId": .string("live"), "change": value])])
+            }
+            try broadcast(["type": "snapshot", "revision": 1, "conversationState": NativeAttentionSnapshotTests.state()])
+            try await Task.sleep(for: .milliseconds(50))
+            try broadcast(["type": "patches", "baseRevision": 1, "revision": 2, "patches": [["op": "add", "path": ["turns", 1, "items", 1], "value": try NativeAttentionSnapshotTests.reply()]]])
+            try await Task.sleep(for: .milliseconds(50))
+            try broadcast(["type": "patches", "baseRevision": 4, "revision": 5, "patches": []])
+            let unfollow = try readMessage(server), refollow = try readMessage(server)
+            #expect(unfollow["params"]?.objectValue?["following"] == .bool(false))
+            #expect(refollow["params"]?.objectValue?["following"] == .bool(true))
+            try broadcast(["type": "snapshot", "revision": 5, "conversationState": NativeAttentionSnapshotTests.state()])
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let clock = ContinuousClock()
+        let start = clock.now
+        #expect(await ipc.attentionStates(for: ["live"])["live"] == .needsResponse)
+        var iterator = stream.makeAsyncIterator()
+        #expect(await iterator.next()?["live"] == .needsResponse)
+        #expect(await iterator.next()?["live"] == .running)
+        #expect(start.duration(to: clock.now) < .milliseconds(500))
+        #expect(await iterator.next()?["live"] == .needsResponse)
         try await worker.value
     }
 

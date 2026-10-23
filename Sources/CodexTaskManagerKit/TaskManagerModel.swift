@@ -121,6 +121,8 @@ public final class TaskManagerModel {
     private var isRefreshing = false
     private var pendingRefreshHint = TaskRefreshHint.none
     private var refreshLoopTask: Task<Void, Never>?
+    private var liveUpdatesTask: Task<Void, Never>?
+    private var liveStates: [String: TaskAttentionState] = [:]
     private var pinOverrides: [String: Bool]
     private var sourcePinStates: [String: Bool] = [:]
 
@@ -335,12 +337,24 @@ public final class TaskManagerModel {
     }
 
     func stopBackgroundRefreshForTesting() {
+        liveUpdatesTask?.cancel()
+        liveUpdatesTask = nil
         refreshLoopTask?.cancel()
         refreshLoopTask = nil
     }
 
     private func runRefreshLoop() async {
-        defer { refreshLoopTask = nil }
+        defer { refreshLoopTask = nil; liveUpdatesTask?.cancel(); liveUpdatesTask = nil }
+        if let approvalController {
+            let updates = await approvalController.attentionUpdates()
+            liveUpdatesTask = Task { [weak self] in
+                for await states in updates {
+                    guard !Task.isCancelled, let self else { break }
+                    self.liveStates = states
+                    self.tasks = self.applyingLiveStates(to: self.tasks, states: states)
+                }
+            }
+        }
 
         do {
             let observer = try CodexDataChangeObserver()
@@ -402,7 +416,7 @@ public final class TaskManagerModel {
             do {
                 let scannedTasks = try await repository.loadTasks(refresh: nextHint, simulatedRead: readSettings.mode == .simulated)
                 nativeReadStateEnabled = await repository.usesNativeReadState()
-                let reconciledTasks = await reconcileLiveApprovalStates(in: scannedTasks)
+                let reconciledTasks = applyingLiveStates(to: await reconcileLiveApprovalStates(in: scannedTasks), states: liveStates)
                 sourcePinStates = Dictionary(uniqueKeysWithValues: reconciledTasks.map { ($0.id, $0.isPinned) })
                 let refreshedTasks = applyPinOverrides(to: reconciledTasks)
                 if refreshedTasks != tasks {
@@ -439,6 +453,13 @@ public final class TaskManagerModel {
             }
         }
         return reconciled
+    }
+
+    private func applyingLiveStates(to tasks: [CodexTask], states: [String: TaskAttentionState]) -> [CodexTask] {
+        tasks.map { task in
+            guard task.isDesktopManaged, let state = states[task.id] else { return task }
+            return task.replacingState(state == .idle && task.isUnread ? .complete : state)
+        }
     }
 
     public func toggleDisclosure(for projectPath: String) {

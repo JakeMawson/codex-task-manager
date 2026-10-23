@@ -17,6 +17,38 @@ actor CodexDesktopIPCClient {
     private var starting: Task<Void, Error>?
     private var snapshots: [String: CheckedContinuation<TaskAttentionState?, Never>] = [:]
     private var snapshotTimeouts: [String: Task<Void, Never>] = [:]
+    private var updates: AsyncStream<[String: TaskAttentionState]>.Continuation?
+    private var updatesID = UUID()
+    private var followed = Set<String>()
+    private var mirrors: [String: NativeAttentionSnapshot] = [:]
+    private var snapshotDates: [String: Date] = [:]
+    private var observedStates: [String: TaskAttentionState] = [:]
+
+    func attentionUpdates() -> AsyncStream<[String: TaskAttentionState]> {
+        let (stream, continuation) = AsyncStream<[String: TaskAttentionState]>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        updates?.finish()
+        let id = UUID()
+        updatesID = id
+        updates = continuation
+        continuation.onTermination = { [weak self] _ in Task { await self?.stopObserving(id) } }
+        return stream
+    }
+
+    private func stopObserving(_ id: UUID) {
+        guard updatesID == id else { return }
+        updates = nil
+        for id in followed { try? following(id, false) }
+        followed.removeAll()
+        mirrors.removeAll()
+        snapshotDates.removeAll()
+        observedStates.removeAll()
+    }
+
+    private func publish(_ id: String, _ state: TaskAttentionState?) {
+        guard let state, observedStates[id] != state else { return }
+        observedStates[id] = state
+        updates?.yield(observedStates)
+    }
 
     static func attentionState(in state: [String: JSONValue]) -> TaskAttentionState? {
         guard let runtime = state["threadRuntimeStatus"]?.objectValue,
@@ -33,29 +65,7 @@ actor CodexDesktopIPCClient {
     // affect attention. Project the wire snapshot before generic Codable
     // decoding, so another chat cannot consume this chat's snapshot deadline.
     static func attentionState(inNativeState state: [String: Any]) -> TaskAttentionState? {
-        var turns = state["turns"] as? [[String: Any]] ?? []
-        if let history = state["turnHistory"] as? [String: Any],
-           let entries = history["history"] as? [String: Any],
-           let entities = entries["entitiesByKey"] as? [String: Any] {
-            turns.append(contentsOf: entities.values.compactMap { $0 as? [String: Any] })
-        }
-        let items = turns.flatMap { $0["items"] as? [[String: Any]] ?? [] }.compactMap { item -> [String: Any]? in
-            guard let type = item["type"] as? String else { return nil }
-            switch type {
-            case "agentMessage" where item["delivery"] as? String == "async":
-                return item.filter { ["type", "id", "delivery", "questions"].contains($0.key) }
-            case "userMessage", "steeringUserMessage":
-                return item.filter { ["type", "status", "content", "input"].contains($0.key) }
-            default: return nil
-            }
-        }
-        let minimal: [String: Any] = [
-            "threadRuntimeStatus": state["threadRuntimeStatus"] ?? NSNull(),
-            "turns": [["items": items]],
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: minimal),
-              let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) else { return nil }
-        return attentionState(in: decoded)
+        try? NativeAttentionSnapshot(state: state, revision: 0).attention
     }
 
     func attentionState(for threadID: String) async throws -> TaskAttentionState? {
@@ -107,17 +117,37 @@ actor CodexDesktopIPCClient {
         var states: [String: TaskAttentionState] = [:]
         for (id, owner) in ownership where owner == .absent { states[id] = .idle }
         let owned = threadIDs.filter { ownership[$0] == .present }
+        if updates != nil {
+            let retained = Set(threadIDs.filter { ownership[$0] != .absent })
+            for id in followed.subtracting(retained) {
+                try? following(id, false)
+                mirrors[id] = nil
+                observedStates[id] = nil
+                snapshotDates[id] = nil
+                followed.remove(id)
+            }
+            for (id, owner) in ownership where owner == .absent { publish(id, .idle) }
+        }
         await withTaskGroup(of: (String, TaskAttentionState?).self) { group in
             var iterator = owned.makeIterator()
             for _ in 0..<min(8, owned.count) {
-                if let id = iterator.next() { group.addTask { (id, await self.snapshot(for: id)) } }
+                if let id = iterator.next() { group.addTask { (id, await self.observedSnapshot(for: id)) } }
             }
             while let (id, state) = await group.next() {
                 if let state { states[id] = state }
-                if let id = iterator.next() { group.addTask { (id, await self.snapshot(for: id)) } }
+                if let id = iterator.next() { group.addTask { (id, await self.observedSnapshot(for: id)) } }
             }
         }
         return states
+    }
+
+    private func observedSnapshot(for id: String) async -> TaskAttentionState? {
+        if updates != nil {
+            if let mirror = mirrors[id], let date = snapshotDates[id], Date().timeIntervalSince(date) < 30 { return mirror.attention }
+            if followed.contains(id) { try? following(id, false) }
+            followed.insert(id)
+        }
+        return await snapshot(for: id)
     }
 
     private func discoverOwnership(for id: String) async -> (String, Ownership) {
@@ -136,7 +166,10 @@ actor CodexDesktopIPCClient {
     private func finishSnapshot(_ id: String, state: TaskAttentionState?) {
         guard let continuation = snapshots.removeValue(forKey: id) else { return }
         snapshotTimeouts.removeValue(forKey: id)?.cancel()
-        try? following(id, false)
+        if state == nil || !followed.contains(id) {
+            try? following(id, false)
+            followed.remove(id)
+        }
         continuation.resume(returning: state)
     }
 
@@ -333,10 +366,29 @@ actor CodexDesktopIPCClient {
                 // history, including frames arriving after we unfollowed it.
                 if native["method"] as? String == "thread-stream-state-changed",
                    let params = native["params"] as? [String: Any], params["hostId"] as? String == "local",
-                   let id = params["conversationId"] as? String, snapshots[id] != nil,
-                   let change = params["change"] as? [String: Any], change["type"] as? String == "snapshot",
-                   let state = change["conversationState"] as? [String: Any] {
-                    finishSnapshot(id, state: Self.attentionState(inNativeState: state))
+                   let id = params["conversationId"] as? String, snapshots[id] != nil || followed.contains(id),
+                   let change = params["change"] as? [String: Any] {
+                    if change["type"] as? String == "snapshot", let state = change["conversationState"] as? [String: Any] {
+                        if followed.contains(id), let revision = change["revision"] as? Int,
+                           let mirror = try? NativeAttentionSnapshot(state: state, revision: revision) {
+                            mirrors[id] = mirror
+                            snapshotDates[id] = Date()
+                            publish(id, mirror.attention)
+                        }
+                        finishSnapshot(id, state: Self.attentionState(inNativeState: state))
+                    } else if change["type"] as? String == "patches", var mirror = mirrors[id] {
+                        do {
+                            try mirror.apply(change)
+                            mirrors[id] = mirror
+                            publish(id, mirror.attention)
+                        } catch {
+                            // Never apply a delta to the wrong revision. Request
+                            // a new snapshot through the read-only follow route.
+                            mirrors[id] = nil
+                            try? following(id, false)
+                            try? following(id, true)
+                        }
+                    }
                 }
                 continue
             }
@@ -383,6 +435,11 @@ actor CodexDesktopIPCClient {
             readQueue.async { try? handle.close() }
         }
         socketHandle = nil
+        followed.removeAll()
+        mirrors.removeAll()
+        snapshotDates.removeAll()
+        observedStates.removeAll()
+        updates?.yield([:])
         incomingBuffer.removeAll()
         clientID = "initializing-client"
         let continuations = pendingRequests.values

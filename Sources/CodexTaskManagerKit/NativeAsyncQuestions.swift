@@ -28,7 +28,10 @@ enum NativeAsyncQuestions {
         if let entities = state["turnHistory"]?.objectValue?["history"]?.objectValue?["entitiesByKey"]?.objectValue {
             turns.append(contentsOf: entities.values)
         }
-        let items = turns.flatMap { $0.objectValue?["items"]?.arrayValue ?? [] }.compactMap(\.objectValue)
+        // Codex retires async cards when their owning turn ends. Old questions
+        // remain in history after interruption; they are not current requests.
+        let items = turns.filter { $0.objectValue?["status"]?.stringValue == "inProgress" }
+            .flatMap { $0.objectValue?["items"]?.arrayValue ?? [] }.compactMap(\.objectValue)
         var questions: Set<QuestionID> = []
         var answered: Set<QuestionID> = []
         for item in items {

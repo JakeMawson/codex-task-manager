@@ -15,7 +15,7 @@ Public release archives are universal, Developer ID signed, notarized and staple
 
 ## Tasks
 
-The menu item shows how many chats need you. Asynchronous questions count as needing a response even while Codex continues working or finishes its turn; only a matching answer or Skip clears that question. Open it for running, approval, response, complete/unread and read states. Search, filter, pin tasks and projects, arrange project order, or choose grouped and ungrouped views. Selecting a task opens that exact chat in Codex.
+The menu item shows how many chats need you. Asynchronous questions count as needing a response while their turn is in progress, even while Codex continues working. A matching accepted answer or Skip clears that question; ended or interrupted turns retire their questions, matching Codex. Live question, answer and runtime changes update the menu immediately after their native event arrives, independently of catalogue refreshes. Initial connection and recovery still require a full reconciliation. Open it for running, approval, response, complete/unread and read states. Search, filter, pin tasks and projects, arrange project order, or choose grouped and ungrouped views. Selecting a task opens that exact chat in Codex.
 
 Unread status follows Codex Desktop’s current account and local execution host, including chats whose catalogue preview is empty. Reading a chat in Codex clears it here; marking it unread or finishing another turn can bring it back. Old Task Manager overrides cannot mask native unread flags. Monitoring covers local chats only.
 

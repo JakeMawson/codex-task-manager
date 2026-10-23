@@ -59,6 +59,29 @@ private actor DelayedStartApprovalController: TaskApprovalControlling {
     func pause(threadID: String) async throws {}
 }
 
+private actor StreamingApprovalController: TaskApprovalControlling {
+    let stream: AsyncStream<[String: TaskAttentionState]>
+    let continuation: AsyncStream<[String: TaskAttentionState]>.Continuation
+    var blocked: CheckedContinuation<[String: TaskAttentionState], Never>?
+    var blockNext = false
+    let id: String
+    init(id: String) {
+        self.id = id
+        (stream, continuation) = AsyncStream.makeStream()
+    }
+    func attentionUpdates() async -> AsyncStream<[String: TaskAttentionState]> { stream }
+    func liveAttentionState(for threadID: String) async -> TaskAttentionState? { .needsResponse }
+    func liveAttentionStates(for tasks: [CodexTask]) async -> [String: TaskAttentionState] {
+        if blockNext { return await withCheckedContinuation { blocked = $0 } }
+        return [id: .needsResponse]
+    }
+    func arm() { blockNext = true }
+    func waiting() -> Bool { blocked != nil }
+    func emit(_ state: TaskAttentionState) { continuation.yield([id: state]) }
+    func release() { blockNext = false; blocked?.resume(returning: [id: .needsResponse]); blocked = nil }
+    func pause(threadID: String) async throws {}
+}
+
 @Suite("Codex Task Manager")
 struct CodexTaskManagerKitTests {
     @Test("Deep links accept exact UUID task identifiers")
@@ -1929,6 +1952,40 @@ struct CodexTaskManagerKitTests {
         #expect(await controller.recordedLiveStateRequestIDs() == [id])
         model.selectOnlyAttentionFilters()
         #expect(model.presentation.sections.flatMap(\.tasks).count == 1)
+    }
+
+    @Test("Live answers update Needs during a blocked refresh and cannot be overwritten by its stale result")
+    @MainActor
+    func liveAnswerBypassesRefresh() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory.appending(path: "sessions"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let rollout = directory.appending(path: "sessions/rollout.jsonl")
+        try write([line(type: "session_meta", payload: ["originator": "Codex Desktop"]), line(type: "event_msg", payload: ["type": "task_started"])], to: rollout)
+        try makeCatalog(at: directory.appending(path: "state_5.sqlite"), rolloutPath: rollout.path)
+        let id = "00000000-0000-0000-0000-000000000001"
+        let controller = StreamingApprovalController(id: id)
+        let model = TaskManagerModel(repository: CodexTaskRepository(codexHome: directory, desktopRuntimeStartDateProvider: { nil }), defaults: try #require(UserDefaults(suiteName: "CodexTaskManagerTests.live.\(UUID().uuidString)")), approvalController: controller)
+        await model.refresh()
+        #expect(model.attentionCount == 1)
+        await controller.arm()
+        model.startBackgroundRefresh()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !(await controller.waiting()) && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(await controller.waiting())
+        let start = ContinuousClock.now
+        await controller.emit(.running)
+        while model.attentionCount != 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(start.duration(to: .now) < .milliseconds(250))
+        #expect(model.attentionCount == 0)
+        #expect(model.tasks.first?.state == .running)
+        await controller.release()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(model.tasks.first?.state == .running)
+        await controller.emit(.needsResponse)
+        try await Task.sleep(for: .milliseconds(10))
+        #expect(model.attentionCount == 1)
+        model.stopBackgroundRefreshForTesting()
     }
 
     @Test("Missing history placeholders do not trigger native discovery; arriving and removed files are reconciled")

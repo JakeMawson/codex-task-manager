@@ -85,6 +85,25 @@ struct NativeAsyncQuestionTests {
         #expect(CodexDesktopIPCClient.attentionState(in: try snapshot(items: items)) == .running)
     }
 
+    @Test("Interrupted historical questions do not survive a current accepted answer")
+    func aggregatorReplyTrace() throws {
+        var state = try snapshot(items: [question("current", count: 1), try reply("current", index: 0)])
+        let oldTurn: [String: Any] = ["turnId": "old", "status": "interrupted", "items": [question("old-unanswered", count: 1)]]
+        let oldValue = try JSONDecoder().decode(JSONValue.self, from: JSONSerialization.data(withJSONObject: oldTurn))
+        state["turns"] = .array([oldValue])
+        #expect(CodexDesktopIPCClient.attentionState(in: state) == .running)
+        let native = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as! [String: Any]
+        #expect(CodexDesktopIPCClient.attentionState(inNativeState: native) == .running)
+    }
+
+    @Test(arguments: ["completed", "interrupted", "failed", "inProgress"])
+    func owningTurnLifecycle(_ status: String) throws {
+        var native = try JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot(items: [question("old", count: 1)]))) as! [String: Any]
+        native["turnHistory"] = nil
+        native["turns"] = [["status": status, "turnId": "fixture", "items": [question("old", count: 1)]]]
+        #expect(CodexDesktopIPCClient.attentionState(inNativeState: native) == (status == "inProgress" ? .needsResponse : .running))
+    }
+
     private func reply(_ callID: String, index: Int, answer: String = "Chosen", single: Bool = false, tool: String = "request_user_input_async") throws -> [String: Any] {
         let id = String(decoding: try JSONSerialization.data(withJSONObject: [tool, callID, index]), as: UTF8.self)
         let object = ["questionItemId": id, "question": "Please choose.", "answer": answer]
