@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import IndependentAppLaunch
+import ServiceManagement
 
 @main
 @MainActor
@@ -9,6 +10,10 @@ enum CodexTaskManagerLauncher {
     private static let reopen = Notification.Name("com.jakemawson.codex-task-manager.menuagent.show-tasks")
 
     static func main() {
+        if CommandLine.arguments.dropFirst().first == "--login-startup" {
+            manageLoginStartup()
+            return
+        }
         if let running = NSRunningApplication.runningApplications(withBundleIdentifier: agentID).first {
             DistributedNotificationCenter.default().postNotificationName(
                 reopen, object: nil, userInfo: nil, deliverImmediately: true
@@ -37,5 +42,39 @@ enum CodexTaskManagerLauncher {
             alert.runModal()
             return
         }
+    }
+
+    private static func manageLoginStartup() {
+        let service = SMAppService.mainApp
+        var errorMessage: String?
+        do {
+            guard CommandLine.arguments.count == 3 else { throw StartupCommandError.invalidAction }
+            switch CommandLine.arguments[2] {
+            case "status": break
+            case "enable":
+                if service.status != .enabled && service.status != .requiresApproval { try service.register() }
+            case "disable":
+                if service.status != .notRegistered { try service.unregister() }
+            default: throw StartupCommandError.invalidAction
+            }
+        } catch { errorMessage = error.localizedDescription }
+        let status: String
+        switch service.status {
+        case .enabled: status = "enabled"
+        case .notRegistered: status = "notRegistered"
+        case .requiresApproval: status = "requiresApproval"
+        case .notFound: status = "notFound"
+        @unknown default: status = "notFound"
+        }
+        var reply = ["status": status]
+        if let errorMessage { reply["error"] = String(errorMessage.prefix(500)) }
+        if let data = try? JSONSerialization.data(withJSONObject: reply, options: [.sortedKeys]) {
+            FileHandle.standardOutput.write(data)
+        }
+    }
+
+    private enum StartupCommandError: LocalizedError {
+        case invalidAction
+        var errorDescription: String? { "Unsupported login startup command." }
     }
 }

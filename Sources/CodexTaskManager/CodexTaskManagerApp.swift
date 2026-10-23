@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installStatusItem()
         if !CommandLine.arguments.contains(where: { $0.hasPrefix("--qa-") }) {
             AppUpdateModel.shared.start()
+            Task { await LoginStartupModel.shared.start() }
         }
     }
 

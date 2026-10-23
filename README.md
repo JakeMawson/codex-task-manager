@@ -32,7 +32,9 @@ Desktop activity is checked against the chat’s actual live owner. Historical l
 
 ## Settings and updates
 
-Open the gear button or right-click the menu item and choose **Settings…**. Settings shows the installed version and build, a manual update check, and **Automatically prepare updates**.
+Open the gear button or right-click the menu item and choose **Settings…**. Settings includes **Start on boot**, the installed version and build, a manual update check, and **Automatically prepare updates**.
+
+On the first ordinary launch of the installed app, it makes one attempt to enable startup at login using macOS Login Items. The switch reports the actual macOS registration state; if approval is needed, choose **Open Login Items…**. Turning it off preserves that choice across launches and updates. Changes made in System Settings are respected. Startup occurs when you log in, not before login. Failed attempts show a retry control instead of claiming startup is enabled.
 
 Checks run at launch and every two hours. With automatic preparation enabled, the app fetches a newer stable release through its fixed Homebrew cask. It installs a prepared update on the next ordinary launch, or when you choose **Install and relaunch**. It never replaces the app merely because a periodic check found an update. An explicit opt-out is preserved.
 

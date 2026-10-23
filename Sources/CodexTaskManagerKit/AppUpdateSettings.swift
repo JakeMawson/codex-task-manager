@@ -3,6 +3,7 @@ import SwiftUI
 public struct AppUpdateSettings: View {
     @Bindable private var updates: AppUpdateModel
     @Bindable private var model: TaskManagerModel
+    @Bindable private var startup = LoginStartupModel.shared
     @State private var accessibilityAvailable = NativeTaskReadNavigation.accessibilityAvailable
     private let onClose: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
@@ -18,6 +19,28 @@ public struct AppUpdateSettings: View {
                 }
                 Spacer()
                 Button("Done") { if let onClose { onClose() } else { dismiss() } }.keyboardShortcut(.cancelAction)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Start on boot", isOn: Binding(
+                    get: { startup.isOn },
+                    set: { enabled in Task { await startup.setEnabled(enabled) } }
+                )).disabled(startup.busy)
+                Text("Start automatically when you log in to your Mac. You can turn this off at any time.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    if startup.busy { ProgressView().controlSize(.small) }
+                    Text(startup.statusText).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if startup.needsApproval {
+                        Button("Open Login Items…") { startup.openSystemSettings() }
+                    } else if startup.message != nil {
+                        Button("Retry") { Task { await startup.retry() } }.disabled(startup.busy)
+                    }
+                }
+                if let message = startup.message {
+                    Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(3).help(message)
+                }
             }
             Divider()
             readBehavior
@@ -63,11 +86,13 @@ public struct AppUpdateSettings: View {
         }
         .padding(24).frame(width: 500)
         .preferredColorScheme(.dark)
+        .task { await startup.refresh() }
         .onChange(of: model.readSettings.mode) { Task { await model.readBehaviorDidChange() } }
         .onChange(of: model.readSettings.returnToPriorChat) { Task { await model.readBehaviorDidChange() } }
         .onChange(of: model.readSettings.returnDelay) { Task { await model.readBehaviorDidChange() } }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             accessibilityAvailable = NativeTaskReadNavigation.accessibilityAvailable
+            Task { await startup.refresh() }
         }
     }
     private var readBehavior: some View {
