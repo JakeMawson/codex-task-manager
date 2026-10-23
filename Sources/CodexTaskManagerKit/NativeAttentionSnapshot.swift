@@ -3,10 +3,16 @@ import Foundation
 /// A sparse, revisioned mirror of Codex's attention fields. Array positions are
 /// retained so native Immer patches apply without retaining tool output/media.
 struct NativeAttentionSnapshot {
-    private enum Shape {
-        case root, turns, turn, historyContainer, history, entities, items, item, content, contentItem, leaf
+    enum Shape {
+        case wire, parameters, change, root, turns, turn, historyContainer, history, entities, items, item, content, contentItem, leaf
         func child(_ key: String) -> Shape? {
             switch self {
+            case .wire:
+                return key == "params" ? .parameters : ["type", "method", "requestId", "resultType", "handledByClientId", "error", "result"].contains(key) ? .leaf : nil
+            case .parameters:
+                return key == "change" ? .change : ["hostId", "conversationId"].contains(key) ? .leaf : nil
+            case .change:
+                return key == "conversationState" ? .root : ["type", "revision", "baseRevision", "patches"].contains(key) ? .leaf : nil
             case .root:
                 return ["threadRuntimeStatus": .leaf, "turns": .turns, "turnHistory": .historyContainer][key]
             case .historyContainer: return key == "history" ? .history : nil

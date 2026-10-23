@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 
 actor CodexDesktopIPCClient {
+    static let maximumWireFrameLength = 1024 * 1024 * 1024
     private let socketPath: String
     private var connectedHandleForTesting: FileHandle?
     private let requestTimeout: Duration
@@ -11,6 +12,8 @@ actor CodexDesktopIPCClient {
     private let readQueue = DispatchQueue(label: "com.jakemawson.codex-task-manager.ipc-read")
     private var connectionID = UUID()
     private var incomingBuffer = Data()
+    private var frameBytesRemaining = 0
+    private var frameProjection: NativeAttentionJSON?
     private var clientID = "initializing-client"
     private var pendingRequests: [String: CheckedContinuation<[String: JSONValue], Error>] = [:]
     private var requestTimeouts: [String: Task<Void, Never>] = [:]
@@ -82,7 +85,7 @@ actor CodexDesktopIPCClient {
             snapshots[threadID] = continuation
             snapshotTimeouts.removeValue(forKey: threadID)?.cancel()
             snapshotTimeouts[threadID] = Task { [weak self] in
-                do { try await Task.sleep(for: self?.snapshotTimeout ?? .seconds(5)) } catch { return }
+                do { try await Task.sleep(for: self?.snapshotTimeout ?? .seconds(30)) } catch { return }
                 await self?.finishSnapshot(threadID, state: nil)
             }
             do { try following(threadID, true) }
@@ -166,7 +169,10 @@ actor CodexDesktopIPCClient {
     private func finishSnapshot(_ id: String, state: TaskAttentionState?) {
         guard let continuation = snapshots.removeValue(forKey: id) else { return }
         snapshotTimeouts.removeValue(forKey: id)?.cancel()
-        if state == nil || !followed.contains(id) {
+        // A snapshot can queue behind another chat's large history. Retain a
+        // live subscription after the bounded initial wait, so its eventual
+        // snapshot/answer patches still publish instead of being discarded.
+        if !followed.contains(id) {
             try? following(id, false)
             followed.remove(id)
         }
@@ -174,7 +180,7 @@ actor CodexDesktopIPCClient {
     }
 
     init(socketPath: String = FileManager.default.homeDirectoryForCurrentUser
-        .appending(path: ".codex/ipc/ipc.sock").path, connectedHandleForTesting: FileHandle? = nil, requestTimeout: Duration = .seconds(5), snapshotTimeout: Duration = .seconds(5)) {
+        .appending(path: ".codex/ipc/ipc.sock").path, connectedHandleForTesting: FileHandle? = nil, requestTimeout: Duration = .seconds(5), snapshotTimeout: Duration = .seconds(30)) {
         self.socketPath = socketPath
         self.connectedHandleForTesting = connectedHandleForTesting
         self.requestTimeout = requestTimeout
@@ -347,19 +353,30 @@ actor CodexDesktopIPCClient {
     }
 
     private func ingest(_ data: Data) {
-        guard incomingBuffer.count + data.count <= 65 * 1024 * 1024 else { connectionDidClose(); return }
+        guard incomingBuffer.count + data.count <= 128 * 1024 else { connectionDidClose(); return }
         incomingBuffer.append(data)
-        while incomingBuffer.count >= 4 {
-            let payloadLength = Int(incomingBuffer.withUnsafeBytes {
-                $0.loadUnaligned(as: UInt32.self).littleEndian
-            })
-            guard payloadLength > 0, payloadLength <= 64 * 1024 * 1024 else {
-                connectionDidClose()
-                return
+        while !incomingBuffer.isEmpty {
+            if frameBytesRemaining == 0 {
+                guard incomingBuffer.count >= 4 else { return }
+                let length = Int(incomingBuffer.withUnsafeBytes {
+                    $0.loadUnaligned(as: UInt32.self).littleEndian
+                })
+                guard length > 0, length <= Self.maximumWireFrameLength else { connectionDidClose(); return }
+                incomingBuffer.removeSubrange(..<4)
+                frameBytesRemaining = length
+                frameProjection = NativeAttentionJSON()
             }
-            guard incomingBuffer.count >= 4 + payloadLength else { return }
-            let payload = Data(incomingBuffer[4..<(4 + payloadLength)])
-            incomingBuffer.removeSubrange(..<(4 + payloadLength))
+            // The old 64 MiB raw-frame cap disconnected every followed chat
+            // when one large history arrived first. Bound retained attention
+            // data instead, while draining discarded history in 64 KiB reads.
+            let count = min(incomingBuffer.count, frameBytesRemaining)
+            do { try frameProjection?.consume(Data(incomingBuffer.prefix(count))) }
+            catch { connectionDidClose(); return }
+            incomingBuffer.removeSubrange(..<count)
+            frameBytesRemaining -= count
+            guard frameBytesRemaining == 0 else { return }
+            guard let payload = try? frameProjection?.finish() else { connectionDidClose(); return }
+            frameProjection = nil
             guard let native = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { continue }
             if native["type"] as? String == "broadcast" {
                 // Ignore unrelated broadcasts before recursively decoding any
@@ -441,6 +458,8 @@ actor CodexDesktopIPCClient {
         observedStates.removeAll()
         updates?.yield([:])
         incomingBuffer.removeAll()
+        frameBytesRemaining = 0
+        frameProjection = nil
         clientID = "initializing-client"
         let continuations = pendingRequests.values
         pendingRequests.removeAll()

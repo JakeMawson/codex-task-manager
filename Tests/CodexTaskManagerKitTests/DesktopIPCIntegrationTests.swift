@@ -3,7 +3,9 @@ import Darwin
 import Testing
 @testable import CodexTaskManagerKit
 
-@Suite("Desktop IPC transport") struct DesktopIPCIntegrationTests {
+// Fixture peers perform blocking socket I/O. Serializing cases prevents their
+// combined reads from exhausting Swift's cooperative executor during a suite.
+@Suite("Desktop IPC transport", .serialized) struct DesktopIPCIntegrationTests {
     private func pair() throws -> (FileHandle, FileHandle) {
         var descriptors: [Int32] = [0, 0]
         guard socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else { throw CocoaError(.fileReadUnknown) }
@@ -212,6 +214,43 @@ import Testing
         let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client, requestTimeout: .milliseconds(50))
         await #expect(throws: (any Error).self) { try await ipc.ownerClientID(for: "no-reply") }
     }
+    @Test(arguments: [65, 153])
+    func largeFollowedHistoryCannotHideAnotherChatsQuestion(_ megabytes: Int) async throws {
+        let (client, server) = try pair()
+        let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client, snapshotTimeout: .seconds(20))
+        let worker = Task.detached {
+            defer { try? server.close() }
+            try send(server, response(try readMessage(server), result: .object(["clientId": .string("test-client")])))
+            for _ in 0..<2 { try send(server, response(try readMessage(server))) }
+            for _ in 0..<2 { _ = try readMessage(server) } // Both histories are followed.
+            // Real Desktop histories exceed 64 MiB. Stream a sanitized equivalent
+            // without allocating/encoding their private tool output in the test.
+            let prefix = Data(#"{"type":"broadcast","method":"thread-stream-state-changed","params":{"hostId":"local","conversationId":"large","change":{"type":"snapshot","revision":1,"conversationState":{"threadRuntimeStatus":{"type":"active","activeFlags":[]},"turns":[{"status":"inProgress","items":[{"type":"commandExecution","aggregatedOutput":""#.utf8)
+            let suffix = Data(#""},{"type":"agentMessage","id":"large-question","delivery":"async","questions":[{"title":"Choose"}]}]}]}}}}"#.utf8)
+            let chunk = Data(repeating: 120, count: 256 * 1024)
+            let repetitions = megabytes * 4
+            var length = UInt32(prefix.count + chunk.count * repetitions + suffix.count).littleEndian
+            try server.write(contentsOf: Data(bytes: &length, count: 4))
+            try server.write(contentsOf: prefix)
+            for _ in 0..<repetitions { try server.write(contentsOf: chunk) }
+            try server.write(contentsOf: suffix)
+            try send(server, ["type": .string("broadcast"), "method": .string("thread-stream-state-changed"), "params": .object([
+                "hostId": .string("local"), "conversationId": .string("pending-question"),
+                "change": .object(["type": .string("snapshot"), "conversationState": .object([
+                    "threadRuntimeStatus": .object(["type": .string("active"), "activeFlags": .array([])]),
+                    "turns": .array([.object(["status": .string("inProgress"), "items": .array([.object([
+                        "type": .string("agentMessage"), "delivery": .string("async"), "id": .string("outswim-equivalent"),
+                        "questions": .array([.object(["title": .string("Choose")])]),
+                    ])])])]),
+                ])]),
+            ])])
+            for _ in 0..<2 { _ = try readMessage(server) } // Unfollows.
+        }
+        let states = await ipc.attentionStates(for: ["large", "pending-question"])
+        #expect(states["large"] == .needsResponse)
+        #expect(states["pending-question"] == .needsResponse)
+        try await worker.value
+    }
     @Test func unavailableSnapshotUnfollowsWithoutInventingIdle() async throws {
         let (client, server) = try pair()
         let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client, snapshotTimeout: .milliseconds(50))
@@ -230,13 +269,35 @@ import Testing
         #expect(try await ipc.attentionState(for: "unavailable") == nil)
         try await worker.value
     }
+    @Test func lateFollowedSnapshotPublishesAfterInitialTimeout() async throws {
+        let (client, server) = try pair()
+        let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client, snapshotTimeout: .milliseconds(20))
+        let stream = await ipc.attentionUpdates()
+        let worker = Task.detached {
+            defer { try? server.close() }
+            try send(server, response(try readMessage(server), result: .object(["clientId": .string("test-client")])))
+            try send(server, response(try readMessage(server)))
+            _ = try readMessage(server)
+            try await Task.sleep(for: .milliseconds(80))
+            let state = try JSONDecoder().decode(JSONValue.self, from: JSONSerialization.data(withJSONObject: NativeAttentionSnapshotTests.state()))
+            try send(server, ["type": .string("broadcast"), "method": .string("thread-stream-state-changed"), "params": .object([
+                "hostId": .string("local"), "conversationId": .string("late"),
+                "change": .object(["type": .string("snapshot"), "revision": .int(1), "conversationState": state]),
+            ])])
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        #expect(await ipc.attentionStates(for: ["late"]).isEmpty)
+        var iterator = stream.makeAsyncIterator()
+        #expect(await iterator.next()?["late"] == .needsResponse)
+        try await worker.value
+    }
     @Test func oversizedFrameFailsClosed() async throws {
         let (client, server) = try pair()
         let ipc = CodexDesktopIPCClient(connectedHandleForTesting: client)
         let worker = Task.detached {
             defer { try? server.close() }
             _ = try readMessage(server)
-            var length = UInt32(64 * 1024 * 1024 + 1).littleEndian
+            var length = UInt32(CodexDesktopIPCClient.maximumWireFrameLength + 1).littleEndian
             try server.write(contentsOf: Data(bytes: &length, count: 4))
         }
         await #expect(throws: (any Error).self) { try await ipc.ownerClientID(for: "oversized") }
