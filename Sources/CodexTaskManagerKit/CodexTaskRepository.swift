@@ -463,7 +463,8 @@ public actor CodexTaskRepository {
             CASE WHEN recency_at_ms > 0 THEN recency_at_ms ELSE recency_at * 1000 END,
             rollout_path,
             is_pinned,
-            COALESCE(thread_source, '')
+            COALESCE(thread_source, ''),
+            COALESCE(source, '')
         FROM threads
         WHERE archived = 0
         ORDER BY recency_at_ms DESC, id DESC;
@@ -482,6 +483,11 @@ public actor CodexTaskRepository {
             guard result == SQLITE_ROW else {
                 throw CodexTaskRepositoryError.query(String(cString: sqlite3_errmsg(database)))
             }
+            let threadSource = string(statement, column: 6)
+            guard !Self.isInternalSubagent(
+                threadSource: threadSource,
+                source: string(statement, column: 7)
+            ) else { continue }
             rows.append(CatalogRow(
                 id: string(statement, column: 0),
                 title: string(statement, column: 1),
@@ -489,7 +495,7 @@ public actor CodexTaskRepository {
                 recencyMilliseconds: sqlite3_column_int64(statement, 3),
                 rolloutPath: string(statement, column: 4),
                 isPinned: sqlite3_column_int(statement, 5) != 0,
-                isDesktopManaged: !string(statement, column: 6).isEmpty
+                isDesktopManaged: !threadSource.isEmpty
             ))
         }
         let canonicalProjectPaths = Self.canonicalProjectPaths(
@@ -507,6 +513,17 @@ public actor CodexTaskRepository {
                 isDesktopManaged: row.isDesktopManaged
             )
         }
+    }
+
+    private static func isInternalSubagent(threadSource: String, source: String) -> Bool {
+        if threadSource == "subagent" { return true }
+        // Explicit desktop classifications are authoritative. In particular,
+        // agent_created_thread is an ordinary UI chat, not an internal worker.
+        guard threadSource.isEmpty,
+              let metadata = try? JSONSerialization.jsonObject(with: Data(source.utf8)) as? [String: Any]
+        else { return false }
+        // Older sessions predate thread_source and store the tagged origin here.
+        return metadata["subagent"] != nil
     }
 
     static func canonicalProjectPaths(

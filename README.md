@@ -32,6 +32,8 @@ Desktop activity is checked against the chat’s actual live owner. Historical l
 
 **Stop task** sends Codex’s native user-stop operation to that chat’s owner, including its Goal handling. After acknowledgement, the entry is dismissed across refreshes and app relaunches; a detected new turn brings it back. A rejected action stays visible with an error. Stopping a turn does not terminate independent background processes launched by the chat. Approval decisions stay in Codex’s native approval UI.
 
+Internal subagents that are hidden from Codex’s chat list are excluded. Ordinary chats remain visible, including chats created by another chat.
+
 ## Settings and updates
 
 Open the gear button or right-click the menu item and choose **Settings…**. Settings includes **Start on boot**, the installed version and build, a manual update check, and **Automatically prepare updates**.

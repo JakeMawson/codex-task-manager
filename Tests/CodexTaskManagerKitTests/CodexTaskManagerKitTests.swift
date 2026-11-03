@@ -2150,7 +2150,8 @@ struct CodexTaskManagerKitTests {
             rollout_path TEXT,
             is_pinned INTEGER,
             archived INTEGER,
-            thread_source TEXT
+            thread_source TEXT,
+            source TEXT
         );
         INSERT INTO threads VALUES (
             '00000000-0000-0000-0000-000000000001',
@@ -2163,7 +2164,8 @@ struct CodexTaskManagerKitTests {
             '\(escapedPath)',
             0,
             0,
-            '\(escapedThreadSource)'
+            '\(escapedThreadSource)',
+            'vscode'
         );
         """
         guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
