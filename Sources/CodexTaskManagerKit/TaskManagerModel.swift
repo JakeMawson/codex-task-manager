@@ -237,6 +237,10 @@ public final class TaskManagerModel {
         groupByProject || sort.forcesGrouping
     }
 
+    public var isSearching: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     public var presentation: TaskListPresentation {
         TaskListEngine.presentation(
             tasks: tasks,
@@ -260,6 +264,7 @@ public final class TaskManagerModel {
     }
 
     public var statusFilterLabel: String {
+        if isSearching { return "Search all" }
         switch selectedStatusFilters.count {
         case 0:
             return TaskStatusFilter.all.label
@@ -471,7 +476,7 @@ public final class TaskManagerModel {
     }
 
     public func isProjectCollapsed(_ projectPath: String) -> Bool {
-        collapsedProjectPaths.contains(projectPath)
+        !isSearching && collapsedProjectPaths.contains(projectPath)
     }
 
     public func toggleProjectCollapsed(_ projectPath: String) {

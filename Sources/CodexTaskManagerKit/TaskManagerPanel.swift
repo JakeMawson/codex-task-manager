@@ -79,7 +79,7 @@ public struct TaskManagerPanel: View {
                 value: model.attentionCount,
                 label: "NEEDS",
                 color: TaskManagerPalette.burntAmber,
-                isSelected: model.isAttentionFilterSelected,
+                isSelected: !model.isSearching && model.isAttentionFilterSelected,
                 accessibilityLabel: "Show tasks needing attention",
                 action: model.selectOnlyAttentionFilters
             )
@@ -88,7 +88,7 @@ public struct TaskManagerPanel: View {
                 value: model.stateCount(.running),
                 label: "RUNNING",
                 color: TaskManagerPalette.mineralTeal,
-                isSelected: model.isStatusFilterSelected(.running),
+                isSelected: !model.isSearching && model.isStatusFilterSelected(.running),
                 accessibilityLabel: "Show running tasks",
                 action: { model.selectOnlyStatusFilter(.running) }
             )
@@ -97,7 +97,7 @@ public struct TaskManagerPanel: View {
                 value: model.stateCount(.complete),
                 label: "COMPLETE",
                 color: TaskManagerPalette.signalBlue,
-                isSelected: model.isStatusFilterSelected(.complete),
+                isSelected: !model.isSearching && model.isStatusFilterSelected(.complete),
                 accessibilityLabel: "Show complete tasks",
                 action: { model.selectOnlyStatusFilter(.complete) }
             )
@@ -109,6 +109,7 @@ public struct TaskManagerPanel: View {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
                 .stroke(TaskManagerPalette.hairline)
         }
+        .disabled(model.isSearching)
     }
 
     private func summaryItem(
@@ -192,6 +193,8 @@ public struct TaskManagerPanel: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .frame(maxWidth: .infinity)
+        .disabled(model.isSearching)
+        .help(model.isSearching ? "Search includes all statuses. Clear the search to filter by status." : "Filter tasks by status")
     }
 
     private func categoryMenuOption(_ filter: TaskStatusFilter) -> some View {
@@ -331,8 +334,8 @@ public struct TaskManagerPanel: View {
         let isCollapsed = section.projectPath.map(model.isProjectCollapsed) ?? false
         return VStack(alignment: .leading, spacing: 7) {
             if let path = section.projectPath,
-               model.showProjectNames || model.isProjectPinned(path) {
-                projectHeader(path: path, count: section.totalCount, isCollapsible: true)
+               model.showProjectNames || model.isProjectPinned(path) || model.isSearching {
+                projectHeader(path: path, count: section.totalCount, isCollapsible: !model.isSearching)
             }
             if !isCollapsed {
                 ForEach(section.tasks) { task in

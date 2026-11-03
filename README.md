@@ -32,6 +32,8 @@ Desktop activity is checked against the chat’s actual live owner. Historical l
 
 **Stop task** sends Codex’s native user-stop operation to that chat’s owner, including its Goal handling. After acknowledgement, the entry is dismissed across refreshes and app relaunches; a detected new turn brings it back. A rejected action stays visible with an error. Stopping a turn does not terminate independent background processes launched by the chat. Approval decisions stay in Codex’s native approval UI.
 
+Search includes all task statuses, with chat-name matches first, project matches next and message matches afterward. Matching project names group their chats under that project, even when the normal list is ungrouped. Search temporarily expands collapsed groups; clearing it restores your category filters and collapsed groups.
+
 Internal subagents that are hidden from Codex’s chat list are excluded. Ordinary chats remain visible, including chats created by another chat.
 
 ## Settings and updates

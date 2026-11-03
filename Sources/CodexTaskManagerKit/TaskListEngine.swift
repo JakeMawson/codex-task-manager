@@ -19,8 +19,9 @@ public enum TaskListEngine {
         let promotesPins = query.isEmpty
         let activeFilters = Set(filter.filter(\.isSelectableCategory))
         var matches = tasks.filter { task in
-            matchesFilter(task, filter: activeFilters)
-                && (query.isEmpty || task.searchableText.localizedCaseInsensitiveContains(query))
+            query.isEmpty
+                ? matchesFilter(task, filter: activeFilters)
+                : task.searchableText.localizedCaseInsensitiveContains(query)
         }
 
         matches = sorted(
@@ -31,7 +32,10 @@ public enum TaskListEngine {
             promotesPins: promotesPins
         )
 
-        let shouldGroup = groupByProject || sort.forcesGrouping
+        let searchesProjects = !query.isEmpty && matches.contains {
+            $0.projectName.localizedCaseInsensitiveContains(query)
+        }
+        let shouldGroup = groupByProject || sort.forcesGrouping || searchesProjects
         let pinnedMatches = promotesPins ? matches.filter(\.isPinned) : []
         let matchingPinnedProjectPaths = promotesPins
             ? pinnedProjectPaths.intersection(matches.map(\.projectPath))
@@ -74,14 +78,15 @@ public enum TaskListEngine {
             let ordinarySection = ordinaryTasks.isEmpty ? [] : [TaskSection(projectPath: nil, tasks: ordinaryTasks)]
             fullSections = taskPinnedSection + projectPinnedSections + ordinarySection
         }
-        let shouldLimitProjects = activeFilters.isEmpty && query.isEmpty && fullSections.contains { $0.projectPath != nil }
+        let rankedSections = query.isEmpty ? fullSections : rankedSearchSections(fullSections, query: query)
+        let shouldLimitProjects = activeFilters.isEmpty && query.isEmpty && rankedSections.contains { $0.projectPath != nil }
         let sections = shouldLimitProjects
             ? limitedByProject(
-                fullSections,
+                rankedSections,
                 expandedProjectPaths: expandedProjectPaths,
                 collapsedLimit: collapsedLimit
             )
-            : fullSections
+            : rankedSections
 
         return TaskListPresentation(
             sections: sections,
@@ -198,6 +203,29 @@ public enum TaskListEngine {
     public static func firstProjectOrder(_ tasks: [CodexTask]) -> [String] {
         var seen = Set<String>()
         return tasks.compactMap { seen.insert($0.projectPath).inserted ? $0.projectPath : nil }
+    }
+
+    private static func searchRank(_ task: CodexTask, query: String) -> Int {
+        if task.title.localizedCaseInsensitiveContains(query) { return 0 }
+        if task.projectName.localizedCaseInsensitiveContains(query)
+            || task.projectPath.localizedCaseInsensitiveContains(query) { return 1 }
+        return 2
+    }
+
+    private static func rankedSearchSections(_ sections: [TaskSection], query: String) -> [TaskSection] {
+        let ranked = sections.enumerated().map { index, section in
+            let tasks = section.tasks.enumerated().map { offset, task in
+                (offset: offset, task: task, rank: searchRank(task, query: query))
+            }.sorted { lhs, rhs in
+                lhs.rank != rhs.rank ? lhs.rank < rhs.rank : lhs.offset < rhs.offset
+            }
+            let result = TaskSection(projectPath: section.projectPath, tasks: tasks.map(\.task),
+                                     totalCount: section.totalCount, isPinnedSection: section.isPinnedSection)
+            return (index: index, section: result, rank: tasks.first?.rank ?? Int.max)
+        }
+        return ranked.sorted { lhs, rhs in
+            lhs.rank != rhs.rank ? lhs.rank < rhs.rank : lhs.index < rhs.index
+        }.map(\.section)
     }
 
     private static func projectOrder(

@@ -741,6 +741,9 @@ struct CodexTaskManagerKitTests {
         model.sort = .alphabetical
         model.groupByProject = false
         model.toggleProjectPin(project)
+        #expect(!model.isProjectCollapsed(project))
+        #expect(model.collapsedProjectPaths.contains(project))
+        model.searchText = ""
         #expect(model.isProjectCollapsed(project))
 
         let restoredCollapsed = TaskManagerModel(defaults: defaults, fixtureName: "all")
