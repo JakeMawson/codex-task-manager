@@ -5,6 +5,10 @@ struct PendingRolloutRequest: Sendable {
 }
 
 struct RolloutScanState: Sendable {
+    enum TurnBoundary: Sendable {
+        case unknown, started, completed, aborted
+    }
+
     var latestAssistantMessage: String?
     var latestAssistantMessageDate: Date?
     var latestTurnStartDate: Date?
@@ -14,7 +18,8 @@ struct RolloutScanState: Sendable {
     var isDesktopManaged = false
     var pendingApprovalCalls: [String: PendingRolloutRequest] = [:]
     var pendingInputCalls: [String: PendingRolloutRequest] = [:]
-    var terminalTurn = false
+    var turnBoundary: TurnBoundary = .unknown
+    var terminalTurn: Bool { turnBoundary == .completed || turnBoundary == .aborted }
     var isRunning = false
     var parsedLine = false
     var pendingLine = Data()
@@ -102,7 +107,9 @@ public enum RolloutScanner {
             return snapshot.attentionRequestDate != nil
         }
         if snapshot.isRunning {
-            return snapshot.latestUserMessageDate != nil
+            // A saved prompt at the edge of the tail may follow an abort
+            // just outside it. Look farther back when there is no start record.
+            return snapshot.latestUserMessageDate != nil && state.turnBoundary == .started
         }
         return snapshot.completionDate != nil && snapshot.latestAssistantMessageDate != nil
     }
@@ -175,13 +182,13 @@ public enum RolloutScanner {
                     }
                 case "task_started", "user_message":
                     state.latestTurnStartDate = recordDate
-                    state.terminalTurn = false
+                    state.turnBoundary = .started
                     state.isRunning = true
                     state.pendingApprovalCalls.removeAll()
                     state.pendingInputCalls.removeAll()
                     state.completionDate = nil
                 case "task_complete", "turn_aborted":
-                    state.terminalTurn = true
+                    state.turnBoundary = payloadType == "turn_aborted" ? .aborted : .completed
                     state.isRunning = false
                     state.completionDate = recordDate
                     state.pendingApprovalCalls.removeAll()
@@ -202,7 +209,12 @@ public enum RolloutScanner {
                 // Metadata and tool outputs may be appended after completion.
                 // They cannot resurrect a terminal turn.
                 if payloadType == "message", payload["role"] as? String == "user" {
-                    state.terminalTurn = false
+                    // Desktop can save a prompt after cancelling before a turn
+                    // starts. Only a subsequent start event reopens an abort.
+                    guard state.turnBoundary != .aborted else { continue }
+                    if state.terminalTurn { state.turnBoundary = .unknown }
+                    state.latestUserMessageDate = recordDate
+                    state.latestTurnStartDate = recordDate
                     state.completionDate = nil
                     state.pendingApprovalCalls.removeAll()
                     state.pendingInputCalls.removeAll()
@@ -221,18 +233,12 @@ public enum RolloutScanner {
                     }
                     if !state.terminalTurn { state.isRunning = true }
                     if payload["phase"] as? String == "final_answer" {
-                        state.terminalTurn = true
+                        state.turnBoundary = .completed
                         state.isRunning = false
                         state.completionDate = recordDate
                         state.pendingApprovalCalls.removeAll()
                         state.pendingInputCalls.removeAll()
                     }
-                }
-
-                if payloadType == "message",
-                   payload["role"] as? String == "user" {
-                    state.latestUserMessageDate = recordDate
-                    state.latestTurnStartDate = recordDate
                 }
 
                 if payloadType == "custom_tool_call",

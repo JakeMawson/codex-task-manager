@@ -1894,6 +1894,45 @@ struct CodexTaskManagerKitTests {
         }
     }
 
+    @Test("A saved prompt after an aborted turn does not restart the chat")
+    func savedPromptAfterAbort() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "rollout.jsonl")
+        try write([
+            line(type: "session_meta", payload: ["originator": "Codex Desktop"]),
+            line(timestamp: "2026-08-13T12:00:00Z", type: "event_msg", payload: ["type": "turn_aborted", "reason": "interrupted"]),
+        ], to: url)
+        var cursor = try RolloutScanCursor(fileURL: url)
+        let aborted = cursor.snapshot
+        #expect(!aborted.isRunning)
+        #expect(aborted.completionDate != nil)
+
+        try append([
+            line(type: "event_msg", payload: ["type": "thread_settings_applied", "padding": String(repeating: "x", count: 17_000)]),
+            line(timestamp: "2026-08-13T12:00:01Z", type: "response_item", payload: [
+                "type": "message", "role": "user", "content": [],
+            ]),
+        ], to: url)
+        let afterPrompt = try cursor.scanAppended(fileURL: url)
+        #expect(!afterPrompt.isRunning)
+        #expect(afterPrompt.completionDate == aborted.completionDate)
+        #expect(afterPrompt.latestTurnStartDate == aborted.latestTurnStartDate)
+        #expect(afterPrompt == (try RolloutScanner.scan(fileURL: url)))
+
+        try append([
+            line(timestamp: "2026-08-13T12:01:00Z", type: "event_msg", payload: ["type": "task_started"]),
+            line(timestamp: "2026-08-13T12:01:01Z", type: "response_item", payload: [
+                "type": "message", "role": "user", "content": [],
+            ]),
+        ], to: url)
+        let restarted = try cursor.scanAppended(fileURL: url)
+        #expect(restarted.isRunning)
+        #expect(restarted.completionDate == nil)
+        #expect(restarted == (try RolloutScanner.scan(fileURL: url)))
+    }
+
     @Test("A user message advances turn identity when task_started is missing")
     func userMessageTurnIdentity() throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
